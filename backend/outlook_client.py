@@ -38,6 +38,49 @@ class OutlookClient:
             "expires_in": payload.get("expires_in", 3600),
         }
 
+    async def start_device_code_flow(self, client_id: str) -> dict:
+        """Start device code flow. Returns device_code, user_code, verification_uri, interval, expires_in."""
+        url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+        data = {
+            "client_id": client_id,
+            "scope": "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access User.Read",
+        }
+        resp = await self._http.post(url, data=data)
+        if resp.status_code != 200:
+            try:
+                err = resp.json()
+                raise Exception(err.get("error_description", resp.text[:300]))
+            except Exception:
+                raise
+        return resp.json()
+
+    async def poll_device_code_token(self, client_id: str, device_code: str) -> dict:
+        """Poll for token after user completes device code auth.
+        Returns dict with access_token, refresh_token, expires_in.
+        Raises Exception with 'authorization_pending' if user hasn't completed yet.
+        """
+        data = {
+            "client_id": client_id,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+        }
+        resp = await self._http.post(MS_TOKEN_URL, data=data)
+        payload = resp.json()
+
+        if resp.status_code != 200:
+            error = payload.get("error", "unknown")
+            if error in ("authorization_pending", "slow_down"):
+                raise Exception(error)
+            desc = payload.get("error_description", "")
+            first_line = desc.split("\r\n")[0] if "\r\n" in desc else desc[:200]
+            raise Exception(f"{error}: {first_line}")
+
+        return {
+            "access_token": payload["access_token"],
+            "refresh_token": payload["refresh_token"],
+            "expires_in": payload.get("expires_in", 3600),
+        }
+
     # ── Email Operations ─────────────────────────────────
 
     def _headers(self, access_token: str) -> dict:

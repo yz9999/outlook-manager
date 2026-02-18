@@ -6,6 +6,7 @@
       <div style="display: flex; gap: 10px;">
         <button class="btn btn-secondary" @click="showGroupModal = true">📁 管理分组</button>
         <button class="btn btn-secondary" @click="showBatchModal = true">📥 批量导入</button>
+        <button class="btn btn-secondary" @click="handleExport">📤 导出</button>
         <button class="btn btn-primary" @click="showAddModal = true">➕ 添加账号</button>
       </div>
     </div>
@@ -31,6 +32,94 @@
       >
         {{ group.name }}
         <span class="chip-unread" v-if="group.account_count > 0">{{ group.account_count }}</span>
+      </div>
+    </div>
+
+    <!-- Search Bar -->
+    <div class="search-bar" style="margin-bottom: 20px;">
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <select class="form-input" v-model="searchGroupId" style="width: auto; min-width: 120px; padding: 8px 12px;">
+          <option :value="null">全部分组</option>
+          <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
+        </select>
+        <input
+          class="form-input"
+          v-model="searchKeyword"
+          placeholder="🔍 搜索邮件主题..."
+          style="flex: 1;"
+          @keyup.enter="handleSearch"
+        />
+        <button class="btn btn-primary" @click="handleSearch" :disabled="searchStore.loading">
+          {{ searchStore.loading ? '搜索中...' : '🔍 搜索' }}
+        </button>
+        <button v-if="searchStore.searched" class="btn btn-secondary" @click="clearSearch">✕ 清除</button>
+      </div>
+    </div>
+
+    <!-- Search Results -->
+    <div v-if="searchStore.searched" class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2>🔍 搜索结果 ({{ searchStore.total }})</h2>
+        <span style="color: var(--text-muted); font-size: 0.85rem;">
+          关键词: "{{ searchStore.keyword }}"
+        </span>
+      </div>
+      <div class="card-body" style="padding: 0;">
+        <div v-if="searchStore.loading" class="loading-center">
+          <div class="spinner"></div>
+        </div>
+        <div v-else-if="searchStore.results.length === 0" class="empty-state">
+          <div class="empty-state-icon">🔍</div>
+          <div class="empty-state-text">没有找到匹配的邮件</div>
+        </div>
+        <div v-else class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>主题</th>
+                <th>发件人</th>
+                <th>时间</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="email in searchStore.results"
+                :key="email.id"
+                @click="openSearchEmail(email)"
+                style="cursor: pointer;"
+                class="search-result-row"
+              >
+                <td style="font-size: 0.82rem; color: var(--accent-light); white-space: nowrap;">{{ email.account_email }}</td>
+                <td style="font-weight: 500; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ email.subject || '(无主题)' }}</td>
+                <td style="font-size: 0.85rem;">{{ email.sender_name || email.sender_address || '未知' }}</td>
+                <td style="font-size: 0.82rem; color: var(--text-muted); white-space: nowrap;">{{ formatTime(email.received_at) }}</td>
+                <td>
+                  <span :style="{ color: email.is_read ? 'var(--text-muted)' : 'var(--accent-light)', fontWeight: email.is_read ? 400 : 600 }">
+                    {{ email.is_read ? '已读' : '未读' }}
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <!-- Pagination -->
+          <div v-if="searchStore.total > searchStore.pageSize" style="display: flex; justify-content: center; gap: 10px; padding: 16px;">
+            <button
+              class="btn btn-secondary btn-sm"
+              :disabled="searchStore.page <= 1"
+              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page - 1)"
+            >← 上一页</button>
+            <span style="line-height: 30px; color: var(--text-muted); font-size: 0.85rem;">
+              第 {{ searchStore.page }} / {{ Math.ceil(searchStore.total / searchStore.pageSize) }} 页
+            </span>
+            <button
+              class="btn btn-secondary btn-sm"
+              :disabled="searchStore.page >= Math.ceil(searchStore.total / searchStore.pageSize)"
+              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page + 1)"
+            >下一页 →</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -118,6 +207,13 @@
                 </td>
                 <td>
                   <div style="display: flex; gap: 6px;">
+                    <button
+                      v-if="!account.refresh_token"
+                      class="btn btn-sm" style="background:var(--accent);color:#fff;"
+                      @click="authorizeAccount(account.id)"
+                    >
+                      🔗 授权
+                    </button>
                     <button
                       class="btn btn-sm"
                       :class="emailViewAccount && emailViewAccount.id === account.id ? 'btn-primary' : 'btn-secondary'"
@@ -290,11 +386,11 @@
             <input class="form-input" v-model="form.password" type="password" placeholder="密码" />
           </div>
           <div class="form-group">
-            <label class="form-label">Client ID</label>
+            <label class="form-label">Client ID <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
             <input class="form-input" v-model="form.client_id" placeholder="Azure App Client ID" />
           </div>
           <div class="form-group">
-            <label class="form-label">Refresh Token</label>
+            <label class="form-label">Refresh Token <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
             <textarea class="form-textarea" v-model="form.refresh_token" rows="3" placeholder="Refresh Token"></textarea>
           </div>
         </div>
@@ -328,10 +424,10 @@
               class="form-textarea"
               v-model="batchText"
               rows="8"
-              placeholder="一行一个账号，格式：邮箱----密码----client_id----refresh_token"
+              placeholder="一行一个账号，格式：邮箱----密码 或 邮箱----密码----client_id----refresh_token"
             ></textarea>
             <div class="form-hint">
-              格式: <code>邮箱----密码----client_id----refresh_token</code>，每行一个账号
+              格式: <code>邮箱----密码</code> 或 <code>邮箱----密码----client_id----refresh_token</code>，每行一个
             </div>
           </div>
 
@@ -438,16 +534,41 @@
         </div>
       </div>
     </div>
+
+    <!-- Device Code Auth Modal -->
+    <div v-if="deviceCode" class="modal-overlay" @click.self="cancelDeviceCode">
+      <div class="modal" style="max-width: 420px; text-align: center;">
+        <div class="modal-header">
+          <h3>🔑 账号授权</h3>
+          <button class="btn btn-icon btn-secondary" @click="cancelDeviceCode">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="color:var(--text-muted); margin-bottom:16px;">请打开以下链接，输入验证码完成授权</p>
+          <div style="font-size: 2rem; font-weight: 700; letter-spacing: 6px; color: var(--accent-light); background: rgba(99,102,241,0.08); padding: 16px; border-radius: 12px; margin-bottom: 16px; font-family: monospace;">
+            {{ deviceCode.user_code }}
+          </div>
+          <a :href="deviceCode.verification_uri" target="_blank" class="btn btn-primary" style="display:inline-block; margin-bottom: 16px;">
+            🌐 打开验证页面
+          </a>
+          <p style="color:var(--text-muted); font-size: 0.85rem;">
+            <span v-if="deviceCodeStatus === 'pending'">⭐ 等待中，请在浏览器中完成登录授权...</span>
+            <span v-else-if="deviceCodeStatus === 'success'" style="color:var(--success);">✅ 授权成功！</span>
+            <span v-else-if="deviceCodeStatus === 'error'" style="color:var(--danger);">❌ {{ deviceCodeError }}</span>
+          </p>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAccountsStore } from '../stores/accounts.js'
 import { useGroupsStore } from '../stores/groups.js'
 import { useEmailsStore } from '../stores/emails.js'
 import { useNotificationStore } from '../stores/notification.js'
+import { useSearchStore } from '../stores/search.js'
 import axios from 'axios'
 
 const router = useRouter()
@@ -455,6 +576,7 @@ const accountsStore = useAccountsStore()
 const groupsStore = useGroupsStore()
 const emailsStore = useEmailsStore()
 const notifStore = useNotificationStore()
+const searchStore = useSearchStore()
 
 const accounts = computed(() => accountsStore.accounts)
 const groups = computed(() => groupsStore.groups)
@@ -654,6 +776,67 @@ async function syncOne(id) {
   }
 }
 
+// Device code authorization
+const deviceCode = ref(null)
+const deviceCodeStatus = ref('pending')
+const deviceCodeError = ref('')
+let deviceCodePollTimer = null
+let deviceCodeAccountId = null
+
+async function authorizeAccount(accountId) {
+  try {
+    const resp = await axios.post(`/api/oauth/device-start/${accountId}`)
+    deviceCode.value = resp.data
+    deviceCodeStatus.value = 'pending'
+    deviceCodeError.value = ''
+    deviceCodeAccountId = accountId
+    // Start polling
+    startDeviceCodePolling(accountId)
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '获取设备码失败', 'error')
+  }
+}
+
+function startDeviceCodePolling(accountId) {
+  stopDeviceCodePolling()
+  deviceCodePollTimer = setInterval(async () => {
+    try {
+      const resp = await axios.post(`/api/oauth/device-poll/${accountId}`)
+      if (resp.data.status === 'success') {
+        deviceCodeStatus.value = 'success'
+        stopDeviceCodePolling()
+        notifStore.addToast('授权成功！', 'success')
+        setTimeout(() => {
+          deviceCode.value = null
+          accountsStore.fetchAccounts()
+        }, 1500)
+      }
+    } catch (e) {
+      if (e.response?.status === 400) {
+        deviceCodeStatus.value = 'error'
+        deviceCodeError.value = e.response?.data?.detail || '授权失败'
+        stopDeviceCodePolling()
+      }
+    }
+  }, 5000)
+}
+
+function stopDeviceCodePolling() {
+  if (deviceCodePollTimer) {
+    clearInterval(deviceCodePollTimer)
+    deviceCodePollTimer = null
+  }
+}
+
+function cancelDeviceCode() {
+  stopDeviceCodePolling()
+  deviceCode.value = null
+}
+
+onUnmounted(() => {
+  stopDeviceCodePolling()
+})
+
 async function changeGroup(accountId, value) {
   const groupId = value === '' ? null : parseInt(value)
   try {
@@ -666,8 +849,8 @@ async function changeGroup(accountId, value) {
 }
 
 async function handleAdd() {
-  if (!form.value.email || !form.value.password || !form.value.client_id || !form.value.refresh_token) {
-    notifStore.addToast('请填写所有字段', 'error')
+  if (!form.value.email || !form.value.password) {
+    notifStore.addToast('请填写邮箱和密码', 'error')
     return
   }
   adding.value = true
@@ -761,6 +944,49 @@ async function handleDelete() {
   }
 }
 
+// Export
+function handleExport() {
+  const params = new URLSearchParams()
+  if (filterGroupId.value != null && filterGroupId.value !== 0) {
+    params.set('group_id', filterGroupId.value)
+  }
+  const url = `/api/accounts/export${params.toString() ? '?' + params.toString() : ''}`
+  window.open(url, '_blank')
+}
+
+// Search
+const searchKeyword = ref('')
+const searchGroupId = ref(null)
+
+function handleSearch() {
+  searchStore.search(searchKeyword.value, searchGroupId.value)
+}
+
+function clearSearch() {
+  searchKeyword.value = ''
+  searchGroupId.value = null
+  searchStore.clearSearch()
+}
+
+function openSearchEmail(email) {
+  // Find the account object to set up the email modal
+  const account = accounts.value.find(a => a.id === email.account_id)
+  if (!account) {
+    notifStore.addToast(`找不到账号 ${email.account_email}`, 'error')
+    return
+  }
+  // Open the email detail modal directly
+  emailViewAccount.value = account
+  viewingDetail.value = true
+  emailsStore.fetchEmailDetail(account.id, email.message_id)
+
+  // Mark as read in local DB + update search result in-place
+  if (!email.is_read) {
+    email.is_read = true
+    axios.patch(`/api/emails/${email.id}/mark-read`).catch(() => {})
+  }
+}
+
 onMounted(() => {
   groupsStore.fetchGroups()
 })
@@ -788,6 +1014,10 @@ input[type="checkbox"] {
   height: 16px;
   cursor: pointer;
   accent-color: var(--accent);
+}
+
+.search-result-row:hover {
+  background: rgba(99, 102, 241, 0.08) !important;
 }
 </style>
 

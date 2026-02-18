@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from datetime import datetime, timedelta
@@ -41,6 +42,8 @@ async def list_accounts(
 async def add_account(
     payload: AccountCreate, session: AsyncSession = Depends(get_session)
 ):
+    from config import DEFAULT_CLIENT_ID
+
     # Check duplicate
     existing = await session.execute(
         select(Account).where(Account.email == payload.email)
@@ -51,7 +54,7 @@ async def add_account(
     account = Account(
         email=payload.email,
         password=payload.password,
-        client_id=payload.client_id,
+        client_id=payload.client_id or DEFAULT_CLIENT_ID,
         refresh_token=payload.refresh_token,
         group_id=payload.group_id,
     )
@@ -79,15 +82,19 @@ async def batch_import(
             continue
         total += 1
         parts = line.split("----")
-        if len(parts) != 4:
+        if len(parts) not in (2, 4):
             failed += 1
-            errors.append(f"第 {i} 行格式错误：需要4个字段，实际 {len(parts)} 个")
+            errors.append(f"第 {i} 行格式错误：需要2或4个字段，实际 {len(parts)} 个")
             continue
 
-        email, password, client_id, refresh_token = [p.strip() for p in parts]
-        if not all([email, password, client_id, refresh_token]):
+        email = parts[0].strip()
+        password = parts[1].strip()
+        client_id = parts[2].strip() if len(parts) > 2 else None
+        refresh_token = parts[3].strip() if len(parts) > 3 else None
+
+        if not email or not password:
             failed += 1
-            errors.append(f"第 {i} 行字段不能为空")
+            errors.append(f"第 {i} 行邮箱和密码不能为空")
             continue
 
         # Skip duplicate
@@ -102,8 +109,8 @@ async def batch_import(
         account = Account(
             email=email,
             password=password,
-            client_id=client_id,
-            refresh_token=refresh_token,
+            client_id=client_id or None,
+            refresh_token=refresh_token or None,
             group_id=payload.group_id,
         )
         session.add(account)
@@ -198,12 +205,41 @@ async def sync_account(
         account.status = "active"
         account.last_synced = datetime.utcnow()
         account.last_error = None
+
+        # Save emails to local DB
+        from scheduler import _save_emails
+        saved = await _save_emails(session, account, account.access_token)
+
         await session.commit()
 
-        return {"message": "同步成功", "unread_count": unread}
+        return {"message": "同步成功", "unread_count": unread, "emails_saved": saved}
 
     except Exception as e:
         account.status = "error"
         account.last_error = str(e)[:500]
         await session.commit()
         raise HTTPException(500, f"同步失败: {str(e)[:200]}")
+
+
+@router.get("/export", response_class=PlainTextResponse)
+async def export_accounts(
+    group_id: int = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Export accounts as text file: email----password----client_id----refresh_token"""
+    q = select(Account)
+    if group_id is not None:
+        q = q.where(Account.group_id == group_id)
+    q = q.order_by(Account.created_at.asc())
+    result = await session.execute(q)
+    accounts = result.scalars().all()
+
+    lines = []
+    for a in accounts:
+        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}"
+        lines.append(line)
+
+    return PlainTextResponse(
+        "\n".join(lines),
+        headers={"Content-Disposition": "attachment; filename=accounts_export.txt"}
+    )

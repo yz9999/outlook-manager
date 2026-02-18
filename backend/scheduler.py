@@ -2,13 +2,14 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from collections import deque
+from dateutil import parser as dtparser
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from config import STAGGER_INTERVAL_MINUTES, ROUND_COOLDOWN_HOURS
 from database import async_session
-from models import Account, Group
+from models import Account, Group, Email
 from outlook_client import outlook_client
 
 from typing import Dict, List
@@ -43,6 +44,63 @@ def _add_log(level: str, email: str, message: str):
         "email": email,
         "message": message,
     })
+
+
+async def _save_emails(session, account: Account, access_token: str):
+    """Fetch latest emails from Graph API and save new ones to local DB."""
+    try:
+        data = await outlook_client.fetch_emails(access_token, top=30)
+        messages = data.get("value", [])
+        if not messages:
+            return 0
+
+        # Get existing message_ids for this account
+        existing_result = await session.execute(
+            select(Email.message_id).where(Email.account_id == account.id)
+        )
+        existing_ids = set(r[0] for r in existing_result.all())
+
+        new_count = 0
+        for msg in messages:
+            msg_id = msg.get("id")
+            if not msg_id or msg_id in existing_ids:
+                continue
+
+            # Parse sender
+            sender_name = None
+            sender_address = None
+            fr = msg.get("from")
+            if fr and fr.get("emailAddress"):
+                ea = fr["emailAddress"]
+                sender_name = ea.get("name")
+                sender_address = ea.get("address")
+
+            # Parse received time
+            received_at = None
+            raw_time = msg.get("receivedDateTime")
+            if raw_time:
+                try:
+                    received_at = dtparser.isoparse(raw_time).replace(tzinfo=None)
+                except Exception:
+                    pass
+
+            email_record = Email(
+                account_id=account.id,
+                message_id=msg_id,
+                subject=(msg.get("subject") or "")[:500],
+                sender_name=(sender_name or "")[:255],
+                sender_address=(sender_address or "")[:255],
+                is_read=msg.get("isRead", False),
+                body_preview=(msg.get("bodyPreview") or "")[:500],
+                received_at=received_at,
+            )
+            session.add(email_record)
+            new_count += 1
+
+        return new_count
+    except Exception as e:
+        logger.warning(f"保存邮件失败 {account.email}: {e}")
+        return 0
 
 
 async def sync_one_account():
@@ -125,6 +183,13 @@ async def sync_one_account():
             account.status = "active"
             account.last_synced = datetime.utcnow()
             account.last_error = None
+
+            # Save emails to local DB
+            saved = await _save_emails(session, account, account.access_token)
+            if saved > 0:
+                _add_log("info", account.email, f"保存了 {saved} 封新邮件到本地")
+                logger.info(f"💾 {account.email}: 保存了 {saved} 封新邮件到本地")
+
             _add_log("success", account.email, f"同步成功 ({idx + 1}/{total})，未读: {unread}")
 
         except Exception as e:

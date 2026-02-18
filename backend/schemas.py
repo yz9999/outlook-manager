@@ -34,8 +34,8 @@ class GroupResponse(BaseModel):
 class AccountCreate(BaseModel):
     email: str
     password: str
-    client_id: str
-    refresh_token: str
+    client_id: Optional[str] = None
+    refresh_token: Optional[str] = None
     group_id: Optional[int] = None
 
 
@@ -44,6 +44,7 @@ class AccountResponse(BaseModel):
     email: str
     status: str
     unread_count: int
+    refresh_token: Optional[str] = None
     group_id: Optional[int] = None
     group_name: Optional[str] = None
     last_synced: Optional[datetime] = None
@@ -106,3 +107,26 @@ class SyncStatus(BaseModel):
     account_id: int
     email: str
     new_count: int
+
+
+# ── Search ──────────────────────────────────────────────
+
+class LocalEmailSummary(BaseModel):
+    id: int
+    account_id: int
+    account_email: str
+    message_id: str
+    subject: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_address: Optional[str] = None
+    received_at: Optional[datetime] = None
+    is_read: bool = False
+    body_preview: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SearchEmailResponse(BaseModel):
+    results: List[LocalEmailSummary]
+    total: int

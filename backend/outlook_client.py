@@ -58,7 +58,7 @@ class OutlookClient:
             f"{MS_GRAPH_BASE}/me/mailFolders/{folder}/messages"
             f"?$top={top}&$skip={skip}"
             f"&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
-            f"&$orderby=receivedDateTime asc"
+            f"&$orderby=receivedDateTime desc"
             f"&$count=true"
         )
         resp = await self._http.get(url, headers=self._headers(access_token))

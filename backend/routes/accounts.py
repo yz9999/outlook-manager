@@ -26,7 +26,7 @@ async def list_accounts(
     q = select(Account)
     if group_id is not None:
         q = q.where(Account.group_id == group_id)
-    q = q.order_by(Account.created_at.desc())
+    q = q.order_by(Account.created_at.asc())
     result = await session.execute(q)
     accounts = result.scalars().all()
     out = []

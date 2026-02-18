@@ -22,6 +22,16 @@
 
 ## 本地开发
 
+配置文件：.env.example更改.env，
+.env.example
+# Auth credentials
+AUTH_USERNAME=admin #用户名
+AUTH_PASSWORD=your-password-here #密码，不设置默认change-me
+AUTH_SECRET=your-random-secret-key-here
+
+# Azure App client_id for device code flow
+DEFAULT_CLIENT_ID=your-azure-app-client-id #client_id用于没有refresh_token的账号获取refresh_token
+
 ### 1. 安装后端依赖
 
 ```bash

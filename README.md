@@ -23,7 +23,7 @@
 ## 本地开发
 
 配置文件：.env.example更改.env，
-.env.example
+
 # Auth credentials
 AUTH_USERNAME=admin #用户名
 AUTH_PASSWORD=your-password-here #密码，不设置默认change-me

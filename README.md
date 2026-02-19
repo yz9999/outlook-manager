@@ -35,31 +35,43 @@ DEFAULT_CLIENT_ID=your-azure-app-client-id #client_id用于没有refresh_token�
 ### 1. 安装后端依赖
 
 ```bash
-cd backend
-pip3 install -r requirements.txt
+cd /outlook-manager/backend
+
+# 创建 Python 虚拟环境（推荐）
+python3 -m venv venv
+source venv/bin/activate
+
+# 安装依赖
+pip install -r requirements.txt
 ```
 
-### 2. 安装前端依赖
-
+### 1. 安装前端依赖并构建
 ```bash
-cd frontend
+cd /outlook-manager/frontend
+
+# 安装依赖
 npm install
+
+# 构建生产版本（输出到 dist 目录）
+npm run build
+
+# 构建完成后，node_modules 可以删除以节省空间
+rm -rf node_modules
 ```
 
-### 3. 启动开发模式
+### 3. 启动
 
 ```bash
 # 后端 (端口 8000)
 cd backend
 python3 -m uvicorn main:app --reload --port 8000
 
-# 前端 (端口 3000, 另一个终端)
-cd frontend
-npm run dev
+##后台挂载
+nohup python3 -m uvicorn main:app --reload --port 8000 &
+回车
+
+访问 http://localhost:8000
 ```
-
-访问 http://localhost:3000
-
 ---
 
 ## 🚀 服务器部署教程

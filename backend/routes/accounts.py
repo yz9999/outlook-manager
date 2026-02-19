@@ -243,3 +243,29 @@ async def export_accounts(
         "\n".join(lines),
         headers={"Content-Disposition": "attachment; filename=accounts_export.txt"}
     )
+
+
+@router.post("/export-selected", response_class=PlainTextResponse)
+async def export_selected_accounts(
+    payload: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """Export selected accounts by IDs: email----password----client_id----refresh_token"""
+    account_ids = payload.get("account_ids", [])
+    if not account_ids:
+        raise HTTPException(400, "请选择要导出的账号")
+
+    result = await session.execute(
+        select(Account).where(Account.id.in_(account_ids)).order_by(Account.created_at.asc())
+    )
+    accounts = result.scalars().all()
+
+    lines = []
+    for a in accounts:
+        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}"
+        lines.append(line)
+
+    return PlainTextResponse(
+        "\n".join(lines),
+        headers={"Content-Disposition": "attachment; filename=accounts_export.txt"}
+    )

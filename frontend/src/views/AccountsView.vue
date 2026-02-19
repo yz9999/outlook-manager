@@ -135,6 +135,7 @@
         <button class="btn btn-primary btn-sm" @click="handleBatchMove" :disabled="batchMoving">
           {{ batchMoving ? '移动中...' : '确认移动' }}
         </button>
+        <button class="btn btn-secondary btn-sm" @click="handleExportSelected">📥 导出选中</button>
         <button class="btn btn-secondary btn-sm" @click="selectedIds = []">取消选择</button>
       </div>
     </div>
@@ -945,13 +946,40 @@ async function handleDelete() {
 }
 
 // Export
-function handleExport() {
+async function handleExport() {
   const params = new URLSearchParams()
   if (filterGroupId.value != null && filterGroupId.value !== 0) {
     params.set('group_id', filterGroupId.value)
   }
   const url = `/api/accounts/export${params.toString() ? '?' + params.toString() : ''}`
-  window.open(url, '_blank')
+  try {
+    const resp = await axios.get(url, { responseType: 'blob' })
+    const blob = new Blob([resp.data], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = 'accounts_export.txt'
+    link.click()
+    URL.revokeObjectURL(link.href)
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '导出失败', 'error')
+  }
+}
+
+async function handleExportSelected() {
+  if (selectedIds.value.length === 0) return
+  try {
+    const resp = await axios.post('/api/accounts/export-selected', {
+      account_ids: selectedIds.value,
+    }, { responseType: 'blob' })
+    const blob = new Blob([resp.data], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = 'accounts_export.txt'
+    link.click()
+    URL.revokeObjectURL(link.href)
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '导出失败', 'error')
+  }
 }
 
 // Search

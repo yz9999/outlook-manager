@@ -64,6 +64,9 @@ export const useAccountsStore = defineStore('accounts', {
                     account.unread_count = data.unread_count
                     account.last_synced = new Date().toISOString()
                     account.last_error = null
+                    if (data.imap_enabled !== undefined) account.imap_enabled = data.imap_enabled
+                    if (data.pop3_enabled !== undefined) account.pop3_enabled = data.pop3_enabled
+                    if (data.graph_enabled !== undefined) account.graph_enabled = data.graph_enabled
                 }
                 return data
             } catch (e) {

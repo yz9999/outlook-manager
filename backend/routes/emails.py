@@ -12,7 +12,7 @@ from outlook_client import outlook_client
 router = APIRouter(prefix="/api", tags=["emails"])
 
 
-# ── Online email fetching (existing) ────────────────────
+# ── Helper ──────────────────────────────────────────────
 
 async def _ensure_token(account: Account, session: AsyncSession):
     """Make sure access_token is valid; refresh if expired or missing."""
@@ -41,6 +41,8 @@ def _parse_sender(msg: dict) -> Optional[EmailAddress]:
     return None
 
 
+# ── Email list: Graph API → IMAP → local DB fallback ───
+
 @router.get("/accounts/{account_id}/emails", response_model=EmailListResponse)
 async def list_emails(
     account_id: int,
@@ -55,30 +57,87 @@ async def list_emails(
     if not account:
         raise HTTPException(404, "账号不存在")
 
-    try:
-        await _ensure_token(account, session)
-        data = await outlook_client.fetch_emails(
-            account.access_token, top=top, skip=skip
-        )
-    except Exception as e:
-        raise HTTPException(500, f"获取邮件失败: {str(e)[:200]}")
+    # ── Try Graph API first ──
+    if account.refresh_token and account.client_id:
+        try:
+            await _ensure_token(account, session)
+            data = await outlook_client.fetch_emails(
+                account.access_token, top=top, skip=skip
+            )
+            emails = []
+            for msg in data.get("value", []):
+                emails.append(
+                    EmailSummary(
+                        id=msg["id"],
+                        subject=msg.get("subject"),
+                        sender=_parse_sender(msg),
+                        received_at=msg.get("receivedDateTime"),
+                        is_read=msg.get("isRead", False),
+                        preview=msg.get("bodyPreview", "")[:200],
+                    )
+                )
+            total = data.get("@odata.count", len(emails))
+            return EmailListResponse(emails=emails, total=total)
+        except Exception:
+            pass  # Fall through to IMAP / local DB
+
+    # ── Try IMAP ──
+    if account.client_id and account.refresh_token:
+        try:
+            data = await outlook_client.fetch_emails_imap(
+                account.email, account.password,
+                account.client_id, account.refresh_token,
+                top=top
+            )
+            emails = []
+            for msg in data.get("value", []):
+                emails.append(
+                    EmailSummary(
+                        id=msg["id"],
+                        subject=msg.get("subject"),
+                        sender=_parse_sender(msg),
+                        received_at=msg.get("receivedDateTime"),
+                        is_read=msg.get("isRead", False),
+                        preview=msg.get("bodyPreview", "")[:200],
+                    )
+                )
+            total = data.get("@odata.count", len(emails))
+            return EmailListResponse(emails=emails, total=total)
+        except Exception:
+            pass
+
+    # ── Fallback: read from local DB ──
+    count_q = select(func.count()).where(Email.account_id == account_id)
+    total_result = await session.execute(count_q)
+    total = total_result.scalar() or 0
+
+    q = (
+        select(Email)
+        .where(Email.account_id == account_id)
+        .order_by(Email.received_at.desc())
+        .offset(skip)
+        .limit(top)
+    )
+    result = await session.execute(q)
+    db_emails = result.scalars().all()
 
     emails = []
-    for msg in data.get("value", []):
+    for e in db_emails:
         emails.append(
             EmailSummary(
-                id=msg["id"],
-                subject=msg.get("subject"),
-                sender=_parse_sender(msg),
-                received_at=msg.get("receivedDateTime"),
-                is_read=msg.get("isRead", False),
-                preview=msg.get("bodyPreview", "")[:200],
+                id=e.message_id,
+                subject=e.subject,
+                sender=EmailAddress(name=e.sender_name or "", address=e.sender_address or ""),
+                received_at=e.received_at.isoformat() if e.received_at else None,
+                is_read=e.is_read,
+                preview=e.body_preview or "",
             )
         )
 
-    total = data.get("@odata.count", len(emails))
     return EmailListResponse(emails=emails, total=total)
 
+
+# ── Email detail: Graph API → local DB fallback ────────
 
 @router.get("/accounts/{account_id}/emails/{message_id}", response_model=EmailDetail)
 async def get_email_detail(
@@ -93,30 +152,57 @@ async def get_email_detail(
     if not account:
         raise HTTPException(404, "账号不存在")
 
-    try:
-        await _ensure_token(account, session)
-        msg = await outlook_client.fetch_email_detail(
-            account.access_token, message_id
+    # ── Try Graph API first ──
+    if account.refresh_token and account.client_id:
+        try:
+            await _ensure_token(account, session)
+            msg = await outlook_client.fetch_email_detail(
+                account.access_token, message_id
+            )
+
+            to_list = []
+            for r in msg.get("toRecipients", []):
+                ea = r.get("emailAddress", {})
+                to_list.append(EmailAddress(name=ea.get("name"), address=ea.get("address", "")))
+
+            body = msg.get("body", {})
+
+            return EmailDetail(
+                id=msg["id"],
+                subject=msg.get("subject"),
+                sender=_parse_sender(msg),
+                to_recipients=to_list,
+                received_at=msg.get("receivedDateTime"),
+                is_read=msg.get("isRead", False),
+                body_html=body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>",
+                has_attachments=msg.get("hasAttachments", False),
+            )
+        except Exception:
+            pass  # Fall through to local DB
+
+    # ── Fallback: local DB ──
+    result = await session.execute(
+        select(Email).where(
+            Email.account_id == account_id,
+            Email.message_id == message_id
         )
-    except Exception as e:
-        raise HTTPException(500, f"获取邮件详情失败: {str(e)[:200]}")
-
-    to_list = []
-    for r in msg.get("toRecipients", []):
-        ea = r.get("emailAddress", {})
-        to_list.append(EmailAddress(name=ea.get("name"), address=ea.get("address", "")))
-
-    body = msg.get("body", {})
+    )
+    email_record = result.scalar_one_or_none()
+    if not email_record:
+        raise HTTPException(404, "邮件不存在")
 
     return EmailDetail(
-        id=msg["id"],
-        subject=msg.get("subject"),
-        sender=_parse_sender(msg),
-        to_recipients=to_list,
-        received_at=msg.get("receivedDateTime"),
-        is_read=msg.get("isRead", False),
-        body_html=body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>",
-        has_attachments=msg.get("hasAttachments", False),
+        id=email_record.message_id,
+        subject=email_record.subject,
+        sender=EmailAddress(
+            name=email_record.sender_name or "",
+            address=email_record.sender_address or ""
+        ),
+        to_recipients=[],
+        received_at=email_record.received_at.isoformat() if email_record.received_at else None,
+        is_read=email_record.is_read,
+        body_html=f"<pre>{email_record.body_preview or '邮件内容需要通过 IMAP 获取完整正文'}</pre>",
+        has_attachments=False,
     )
 
 
@@ -125,6 +211,7 @@ async def get_email_detail(
 @router.get("/emails/search", response_model=SearchEmailResponse)
 async def search_emails(
     keyword: str = Query("", description="搜索主题关键词"),
+    account_email: str = Query("", description="搜索账号邮箱"),
     group_id: int = Query(None, description="按分组筛选"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -138,6 +225,9 @@ async def search_emails(
 
     if keyword.strip():
         q = q.where(Email.subject.ilike(f"%{keyword.strip()}%"))
+
+    if account_email.strip():
+        q = q.where(Account.email.ilike(f"%{account_email.strip()}%"))
 
     # Count total
     count_q = select(func.count()).select_from(q.subquery())
@@ -178,4 +268,3 @@ async def mark_email_read(email_id: int, session: AsyncSession = Depends(get_ses
     email.is_read = True
     await session.commit()
     return {"message": "ok"}
-

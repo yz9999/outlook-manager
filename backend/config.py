@@ -17,7 +17,7 @@ MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Staggered sync: interval between each single-account sync (minutes)
-STAGGER_INTERVAL_MINUTES = int(os.environ.get("STAGGER_INTERVAL", "4"))
+STAGGER_INTERVAL_MINUTES = int(os.environ.get("STAGGER_INTERVAL", "2"))
 
 # Cooldown after completing a full round-robin cycle (hours)
 ROUND_COOLDOWN_HOURS = int(os.environ.get("ROUND_COOLDOWN_HOURS", "3"))

@@ -103,6 +103,60 @@ async def _save_emails(session, account: Account, access_token: str):
         return 0
 
 
+async def _save_emails_from_list(session, account: Account, messages: list):
+    """Save pre-parsed messages (from IMAP/POP3) to local DB.
+    Messages use the same Graph-API-like format from outlook_client.
+    """
+    try:
+        if not messages:
+            return 0
+
+        existing_result = await session.execute(
+            select(Email.message_id).where(Email.account_id == account.id)
+        )
+        existing_ids = set(r[0] for r in existing_result.all())
+
+        new_count = 0
+        for msg in messages:
+            msg_id = msg.get("id")
+            if not msg_id or msg_id in existing_ids:
+                continue
+
+            sender_name = None
+            sender_address = None
+            fr = msg.get("from")
+            if fr and fr.get("emailAddress"):
+                ea = fr["emailAddress"]
+                sender_name = ea.get("name")
+                sender_address = ea.get("address")
+
+            received_at = None
+            raw_time = msg.get("receivedDateTime")
+            if raw_time:
+                try:
+                    received_at = dtparser.isoparse(raw_time).replace(tzinfo=None)
+                except Exception:
+                    pass
+
+            email_record = Email(
+                account_id=account.id,
+                message_id=msg_id,
+                subject=(msg.get("subject") or "")[:500],
+                sender_name=(sender_name or "")[:255],
+                sender_address=(sender_address or "")[:255],
+                is_read=msg.get("isRead", False),
+                body_preview=(msg.get("bodyPreview") or "")[:500],
+                received_at=received_at,
+            )
+            session.add(email_record)
+            new_count += 1
+
+        return new_count
+    except Exception as e:
+        logger.warning(f"保存邮件失败 {account.email}: {e}")
+        return 0
+
+
 async def sync_one_account():
     """Background job: sync ONE account from auto_sync-enabled groups (staggered).
     After completing a full round, pause for ROUND_COOLDOWN_HOURS.

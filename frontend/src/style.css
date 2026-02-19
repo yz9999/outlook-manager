@@ -403,6 +403,23 @@ tbody tr:hover {
   background: currentColor;
 }
 
+/* ═══ Protocol Tags ═══ */
+
+.protocol-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.protocol-ok {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
 /* ═══ Notification Badge ═══ */
 
 .notif-badge {

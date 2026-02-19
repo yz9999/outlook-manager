@@ -87,27 +87,27 @@ async def batch_import(
             errors.append(f"第 {i} 行格式错误：需要2或4个字段，实际 {len(parts)} 个")
             continue
 
-        email = parts[0].strip()
+        email_addr = parts[0].strip()
         password = parts[1].strip()
         client_id = parts[2].strip() if len(parts) > 2 else None
         refresh_token = parts[3].strip() if len(parts) > 3 else None
 
-        if not email or not password:
+        if not email_addr or not password:
             failed += 1
             errors.append(f"第 {i} 行邮箱和密码不能为空")
             continue
 
         # Skip duplicate
         existing = await session.execute(
-            select(Account).where(Account.email == email)
+            select(Account).where(Account.email == email_addr)
         )
         if existing.scalar_one_or_none():
             failed += 1
-            errors.append(f"第 {i} 行：{email} 已存在")
+            errors.append(f"第 {i} 行：{email_addr} 已存在")
             continue
 
         account = Account(
-            email=email,
+            email=email_addr,
             password=password,
             client_id=client_id or None,
             refresh_token=refresh_token or None,
@@ -177,7 +177,7 @@ async def batch_update_group(
 async def sync_account(
     account_id: int, session: AsyncSession = Depends(get_session)
 ):
-    """Manually trigger sync for a single account."""
+    """Manually trigger sync — tries Graph → IMAP → POP3 fallback."""
     result = await session.execute(
         select(Account).where(Account.id == account_id)
     )
@@ -189,30 +189,79 @@ async def sync_account(
         account.status = "syncing"
         await session.commit()
 
-        # Refresh token
-        token_data = await outlook_client.refresh_access_token(
-            account.client_id, account.refresh_token
-        )
-        account.access_token = token_data["access_token"]
-        account.refresh_token = token_data["refresh_token"]
-        account.token_expires_at = datetime.utcnow() + timedelta(
-            seconds=token_data["expires_in"]
-        )
+        used_protocol = None
+        sync_error_details = []
 
-        # Get unread count
-        unread = await outlook_client.get_unread_count(account.access_token)
-        account.unread_count = unread
+        # ── Try Graph API ──
+        try:
+            token_data = await outlook_client.refresh_access_token(
+                account.client_id, account.refresh_token
+            )
+            account.access_token = token_data["access_token"]
+            account.refresh_token = token_data["refresh_token"]
+            account.token_expires_at = datetime.utcnow() + timedelta(
+                seconds=token_data["expires_in"]
+            )
+
+            unread = await outlook_client.get_unread_count(account.access_token)
+            account.unread_count = unread
+            account.graph_enabled = True
+
+            from scheduler import _save_emails
+            saved = await _save_emails(session, account, account.access_token)
+            used_protocol = "graph"
+        except Exception as e:
+            sync_error_details.append(f"Graph: {str(e)[:150]}")
+            account.graph_enabled = False
+
+        # ── Try IMAP (if Graph failed) ──
+        if not used_protocol:
+            try:
+                data = await outlook_client.fetch_emails_imap(
+                    account.email, account.password,
+                    account.client_id, account.refresh_token,
+                    top=30
+                )
+                account.unread_count = data.get("_unread_count", 0)
+                account.imap_enabled = True
+                # Save IMAP emails to local DB
+                from scheduler import _save_emails_from_list
+                saved = await _save_emails_from_list(session, account, data.get("value", []))
+                used_protocol = "imap"
+            except Exception as e:
+                sync_error_details.append(f"IMAP: {str(e)[:150]}")
+                account.imap_enabled = False
+
+        if not used_protocol:
+            raise Exception("所有协议均失败: " + "; ".join(sync_error_details))
+
+        # Detect remaining protocols (best-effort, skip the one already confirmed)
+        try:
+            if account.imap_enabled is None:
+                account.imap_enabled = await outlook_client.check_imap(
+                    account.email, account.password, account.client_id, account.refresh_token)
+            if account.pop3_enabled is None:
+                account.pop3_enabled = await outlook_client.check_pop3(
+                    account.email, account.password, account.client_id, account.refresh_token)
+            if account.graph_enabled is None and account.access_token:
+                account.graph_enabled = await outlook_client.check_graph(account.access_token)
+        except Exception:
+            pass
+
         account.status = "active"
         account.last_synced = datetime.utcnow()
         account.last_error = None
-
-        # Save emails to local DB
-        from scheduler import _save_emails
-        saved = await _save_emails(session, account, account.access_token)
-
         await session.commit()
 
-        return {"message": "同步成功", "unread_count": unread, "emails_saved": saved}
+        return {
+            "message": f"同步成功 (via {used_protocol.upper()})",
+            "unread_count": account.unread_count,
+            "emails_saved": saved,
+            "protocol": used_protocol,
+            "imap_enabled": account.imap_enabled,
+            "pop3_enabled": account.pop3_enabled,
+            "graph_enabled": account.graph_enabled,
+        }
 
     except Exception as e:
         account.status = "error"
@@ -269,3 +318,102 @@ async def export_selected_accounts(
         "\n".join(lines),
         headers={"Content-Disposition": "attachment; filename=accounts_export.txt"}
     )
+
+
+@router.post("/{account_id}/check-protocols")
+async def check_protocols(
+    account_id: int, session: AsyncSession = Depends(get_session)
+):
+    """Check IMAP/POP3/Graph availability for a single account."""
+    result = await session.execute(
+        select(Account).where(Account.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "账号不存在")
+
+    try:
+        # Check Graph (needs refresh_token)
+        access_token = None
+        if account.refresh_token and account.client_id:
+            try:
+                token_data = await outlook_client.refresh_access_token(
+                    account.client_id, account.refresh_token
+                )
+                access_token = token_data["access_token"]
+                account.access_token = access_token
+                account.refresh_token = token_data["refresh_token"]
+                account.graph_enabled = await outlook_client.check_graph(access_token)
+            except Exception:
+                account.graph_enabled = False
+        else:
+            account.graph_enabled = False
+
+        # Check IMAP/POP3
+        account.imap_enabled = await outlook_client.check_imap(
+            account.email, account.password, account.client_id, account.refresh_token)
+        account.pop3_enabled = await outlook_client.check_pop3(
+            account.email, account.password, account.client_id, account.refresh_token)
+
+        await session.commit()
+
+        return {
+            "imap_enabled": account.imap_enabled,
+            "pop3_enabled": account.pop3_enabled,
+            "graph_enabled": account.graph_enabled,
+        }
+    except Exception as e:
+        await session.commit()
+        raise HTTPException(500, f"检测失败: {str(e)[:200]}")
+
+
+@router.post("/batch-check-protocols")
+async def batch_check_protocols(
+    payload: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """Batch check IMAP/POP3/Graph for selected accounts."""
+    account_ids = payload.get("account_ids", [])
+    if not account_ids:
+        raise HTTPException(400, "请选择账号")
+
+    result = await session.execute(
+        select(Account).where(Account.id.in_(account_ids))
+    )
+    accounts = result.scalars().all()
+
+    results = []
+    for account in accounts:
+        item = {"id": account.id, "email": account.email}
+        try:
+            # Check Graph
+            if account.refresh_token and account.client_id:
+                try:
+                    token_data = await outlook_client.refresh_access_token(
+                        account.client_id, account.refresh_token
+                    )
+                    access_token = token_data["access_token"]
+                    account.access_token = access_token
+                    account.refresh_token = token_data["refresh_token"]
+                    account.graph_enabled = await outlook_client.check_graph(access_token)
+                except Exception:
+                    account.graph_enabled = False
+            else:
+                account.graph_enabled = False
+
+            # Check IMAP/POP3
+            account.imap_enabled = await outlook_client.check_imap(
+                account.email, account.password, account.client_id, account.refresh_token)
+            account.pop3_enabled = await outlook_client.check_pop3(
+                account.email, account.password, account.client_id, account.refresh_token)
+
+            item["imap_enabled"] = account.imap_enabled
+            item["pop3_enabled"] = account.pop3_enabled
+            item["graph_enabled"] = account.graph_enabled
+        except Exception as e:
+            item["error"] = str(e)[:200]
+
+        results.append(item)
+
+    await session.commit()
+    return {"results": results}

@@ -15,7 +15,7 @@ export const useSearchStore = defineStore('search', {
     }),
 
     actions: {
-        async search(keyword, groupId, page = 1) {
+        async search(keyword, groupId, page = 1, accountEmail = '') {
             this.keyword = keyword
             this.groupId = groupId
             this.page = page
@@ -25,6 +25,7 @@ export const useSearchStore = defineStore('search', {
             try {
                 const params = { keyword, page, page_size: this.pageSize }
                 if (groupId != null) params.group_id = groupId
+                if (accountEmail) params.account_email = accountEmail
                 const { data } = await axios.get('/api/emails/search', { params })
                 this.results = data.results
                 this.total = data.total

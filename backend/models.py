@@ -30,6 +30,9 @@ class Account(Base):
     last_synced = Column(DateTime, nullable=True)
     unread_count = Column(Integer, default=0)
     last_error = Column(Text, nullable=True)
+    imap_enabled = Column(Boolean, nullable=True, default=None)
+    pop3_enabled = Column(Boolean, nullable=True, default=None)
+    graph_enabled = Column(Boolean, nullable=True, default=None)
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

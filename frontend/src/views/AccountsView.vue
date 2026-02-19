@@ -44,6 +44,13 @@
         </select>
         <input
           class="form-input"
+          v-model="searchAccountEmail"
+          placeholder="搜索账号邮箱..."
+          style="width: 200px;"
+          @keyup.enter="handleSearch"
+        />
+        <input
+          class="form-input"
           v-model="searchKeyword"
           placeholder="🔍 搜索邮件主题..."
           style="flex: 1;"
@@ -108,7 +115,7 @@
             <button
               class="btn btn-secondary btn-sm"
               :disabled="searchStore.page <= 1"
-              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page - 1)"
+              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page - 1, searchAccountEmail)"
             >← 上一页</button>
             <span style="line-height: 30px; color: var(--text-muted); font-size: 0.85rem;">
               第 {{ searchStore.page }} / {{ Math.ceil(searchStore.total / searchStore.pageSize) }} 页
@@ -116,7 +123,7 @@
             <button
               class="btn btn-secondary btn-sm"
               :disabled="searchStore.page >= Math.ceil(searchStore.total / searchStore.pageSize)"
-              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page + 1)"
+              @click="searchStore.search(searchStore.keyword, searchStore.groupId, searchStore.page + 1, searchAccountEmail)"
             >下一页 →</button>
           </div>
         </div>
@@ -134,6 +141,9 @@
         </select>
         <button class="btn btn-primary btn-sm" @click="handleBatchMove" :disabled="batchMoving">
           {{ batchMoving ? '移动中...' : '确认移动' }}
+        </button>
+        <button class="btn btn-secondary btn-sm" @click="handleBatchCheckProtocols" :disabled="batchChecking">
+          {{ batchChecking ? '🔍 检测中...' : '🔍 检测协议' }}
         </button>
         <button class="btn btn-secondary btn-sm" @click="handleExportSelected">📥 导出选中</button>
         <button class="btn btn-secondary btn-sm" @click="selectedIds = []">取消选择</button>
@@ -169,6 +179,7 @@
                 <th>邮箱地址</th>
                 <th>分组</th>
                 <th>状态</th>
+                <th>协议</th>
                 <th>未读</th>
                 <th>上次同步</th>
                 <th>操作</th>
@@ -198,6 +209,14 @@
                   </span>
                 </td>
                 <td>
+                  <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                    <span v-if="account.imap_enabled" class="protocol-tag protocol-ok">IMAP</span>
+                    <span v-if="account.pop3_enabled" class="protocol-tag protocol-ok">POP3</span>
+                    <span v-if="account.graph_enabled" class="protocol-tag protocol-ok">Graph</span>
+                    <span v-if="!account.imap_enabled && !account.pop3_enabled && !account.graph_enabled" style="color: var(--text-muted); font-size: 0.8rem;">—</span>
+                  </div>
+                </td>
+                <td>
                   <span v-if="account.unread_count > 0" style="color: var(--accent-light); font-weight: 600;">
                     {{ account.unread_count }}
                   </span>
@@ -221,6 +240,14 @@
                       @click="toggleEmailView(account)"
                     >
                       📬 邮件
+                    </button>
+                    <button
+                      class="btn btn-secondary btn-sm"
+                      @click="checkProtocols(account)"
+                      :disabled="account._checking"
+                      title="检测协议"
+                    >
+                      {{ account._checking ? '⏳' : '🔍' }}
                     </button>
                     <button
                       class="btn btn-secondary btn-sm"
@@ -982,17 +1009,71 @@ async function handleExportSelected() {
   }
 }
 
+// Protocol detection
+const batchChecking = ref(false)
+
+function protocolIcon(val) {
+  if (val === true) return '✅'
+  if (val === false) return '❌'
+  return '❓'
+}
+
+async function checkProtocols(account) {
+  account._checking = true
+  try {
+    const { data } = await axios.post(`/api/accounts/${account.id}/check-protocols`)
+    account.imap_enabled = data.imap_enabled
+    account.pop3_enabled = data.pop3_enabled
+    account.graph_enabled = data.graph_enabled
+    notifStore.addToast(`${account.email} 协议检测完成`, 'success')
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '检测失败', 'error')
+  } finally {
+    account._checking = false
+  }
+}
+
+async function handleBatchCheckProtocols() {
+  if (selectedIds.value.length === 0) return
+  batchChecking.value = true
+  try {
+    const { data } = await axios.post('/api/accounts/batch-check-protocols', {
+      account_ids: selectedIds.value,
+    })
+    // Update local data
+    for (const item of data.results) {
+      const account = accounts.value.find(a => a.id === item.id)
+      if (account) {
+        if (item.imap_enabled !== undefined) account.imap_enabled = item.imap_enabled
+        if (item.pop3_enabled !== undefined) account.pop3_enabled = item.pop3_enabled
+        if (item.graph_enabled !== undefined) account.graph_enabled = item.graph_enabled
+      }
+    }
+    const errors = data.results.filter(r => r.error)
+    if (errors.length > 0) {
+      notifStore.addToast(`检测完成，${errors.length} 个账号失败`, 'warning')
+    } else {
+      notifStore.addToast(`${data.results.length} 个账号协议检测完成`, 'success')
+    }
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '批量检测失败', 'error')
+  } finally {
+    batchChecking.value = false
+  }
+}
+
 // Search
 const searchKeyword = ref('')
 const searchGroupId = ref(null)
-
+const searchAccountEmail = ref('')
 function handleSearch() {
-  searchStore.search(searchKeyword.value, searchGroupId.value)
+  searchStore.search(searchKeyword.value, searchGroupId.value, 1, searchAccountEmail.value)
 }
 
 function clearSearch() {
   searchKeyword.value = ''
   searchGroupId.value = null
+  searchAccountEmail.value = ''
   searchStore.clearSearch()
 }
 

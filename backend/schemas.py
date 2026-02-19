@@ -47,6 +47,9 @@ class AccountResponse(BaseModel):
     refresh_token: Optional[str] = None
     group_id: Optional[int] = None
     group_name: Optional[str] = None
+    imap_enabled: Optional[bool] = None
+    pop3_enabled: Optional[bool] = None
+    graph_enabled: Optional[bool] = None
     last_synced: Optional[datetime] = None
     last_error: Optional[str] = None
     created_at: datetime

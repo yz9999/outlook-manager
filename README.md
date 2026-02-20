@@ -418,3 +418,7 @@ Environment="SYNC_BATCH_SIZE=20"   # 每批 20 个账号
 ```bash
 sudo journalctl -u outlook-manager -f --no-pager
 ```
+
+## 部分功能参考
+https://github.com/assast/outlookEmail
+https://github.com/xiaozhi349/outlookEmail

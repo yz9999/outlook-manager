@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from database import get_session
-from models import Account
+from models import Account, Group
 from schemas import (
     AccountCreate,
     AccountResponse,
@@ -57,6 +57,7 @@ async def add_account(
         client_id=payload.client_id or DEFAULT_CLIENT_ID,
         refresh_token=payload.refresh_token,
         group_id=payload.group_id,
+        remark=payload.remark,
     )
     session.add(account)
     await session.commit()
@@ -82,15 +83,16 @@ async def batch_import(
             continue
         total += 1
         parts = line.split("----")
-        if len(parts) not in (2, 4):
+        if len(parts) not in (2, 4, 5):
             failed += 1
-            errors.append(f"第 {i} 行格式错误：需要2或4个字段，实际 {len(parts)} 个")
+            errors.append(f"第 {i} 行格式错误：需要2、4或5个字段，实际 {len(parts)} 个")
             continue
 
         email_addr = parts[0].strip()
         password = parts[1].strip()
         client_id = parts[2].strip() if len(parts) > 2 else None
         refresh_token = parts[3].strip() if len(parts) > 3 else None
+        remark = parts[4].strip() if len(parts) > 4 else None
 
         if not email_addr or not password:
             failed += 1
@@ -112,6 +114,7 @@ async def batch_import(
             client_id=client_id or None,
             refresh_token=refresh_token or None,
             group_id=payload.group_id,
+            remark=remark,
         )
         session.add(account)
         success += 1
@@ -185,6 +188,16 @@ async def sync_account(
     if not account:
         raise HTTPException(404, "账号不存在")
 
+    # Get proxy_url from group
+    proxy_url = None
+    if account.group_id:
+        grp_result = await session.execute(
+            select(Group).where(Group.id == account.group_id)
+        )
+        grp = grp_result.scalar_one_or_none()
+        if grp and grp.proxy_url:
+            proxy_url = grp.proxy_url
+
     try:
         account.status = "syncing"
         await session.commit()
@@ -195,7 +208,7 @@ async def sync_account(
         # ── Try Graph API ──
         try:
             token_data = await outlook_client.refresh_access_token(
-                account.client_id, account.refresh_token
+                account.client_id, account.refresh_token, proxy_url=proxy_url
             )
             account.access_token = token_data["access_token"]
             account.refresh_token = token_data["refresh_token"]
@@ -203,12 +216,12 @@ async def sync_account(
                 seconds=token_data["expires_in"]
             )
 
-            unread = await outlook_client.get_unread_count(account.access_token)
+            unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
             account.unread_count = unread
             account.graph_enabled = True
 
             from scheduler import _save_emails
-            saved = await _save_emails(session, account, account.access_token)
+            saved = await _save_emails(session, account, account.access_token, proxy_url=proxy_url)
             used_protocol = "graph"
         except Exception as e:
             sync_error_details.append(f"Graph: {str(e)[:150]}")
@@ -244,7 +257,7 @@ async def sync_account(
                 account.pop3_enabled = await outlook_client.check_pop3(
                     account.email, account.password, account.client_id, account.refresh_token)
             if account.graph_enabled is None and account.access_token:
-                account.graph_enabled = await outlook_client.check_graph(account.access_token)
+                account.graph_enabled = await outlook_client.check_graph(account.access_token, proxy_url=proxy_url)
         except Exception:
             pass
 
@@ -285,7 +298,7 @@ async def export_accounts(
 
     lines = []
     for a in accounts:
-        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}"
+        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}----{a.remark or ''}"
         lines.append(line)
 
     return PlainTextResponse(
@@ -311,7 +324,7 @@ async def export_selected_accounts(
 
     lines = []
     for a in accounts:
-        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}"
+        line = f"{a.email}----{a.password}----{a.client_id or ''}----{a.refresh_token or ''}----{a.remark or ''}"
         lines.append(line)
 
     return PlainTextResponse(

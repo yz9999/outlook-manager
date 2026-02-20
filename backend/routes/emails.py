@@ -5,16 +5,16 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 from database import get_session
-from models import Account, Email
+from models import Account, Email, Group
 from schemas import EmailSummary, EmailDetail, EmailListResponse, EmailAddress, LocalEmailSummary, SearchEmailResponse
-from outlook_client import outlook_client
+from outlook_client import outlook_client, ProxyError
 
 router = APIRouter(prefix="/api", tags=["emails"])
 
 
 # ── Helper ──────────────────────────────────────────────
 
-async def _ensure_token(account: Account, session: AsyncSession):
+async def _ensure_token(account: Account, session: AsyncSession, proxy_url: str = None):
     """Make sure access_token is valid; refresh if expired or missing."""
     needs_refresh = (
         not account.access_token
@@ -23,7 +23,7 @@ async def _ensure_token(account: Account, session: AsyncSession):
     )
     if needs_refresh:
         token_data = await outlook_client.refresh_access_token(
-            account.client_id, account.refresh_token
+            account.client_id, account.refresh_token, proxy_url=proxy_url
         )
         account.access_token = token_data["access_token"]
         account.refresh_token = token_data["refresh_token"]
@@ -31,6 +31,17 @@ async def _ensure_token(account: Account, session: AsyncSession):
             seconds=token_data["expires_in"]
         )
         await session.commit()
+
+
+async def _get_proxy_url(account: Account, session: AsyncSession) -> Optional[str]:
+    """Get the proxy URL from the account's group, if set."""
+    if not account.group_id:
+        return None
+    result = await session.execute(
+        select(Group).where(Group.id == account.group_id)
+    )
+    group = result.scalar_one_or_none()
+    return group.proxy_url if group else None
 
 
 def _parse_sender(msg: dict) -> Optional[EmailAddress]:
@@ -41,13 +52,14 @@ def _parse_sender(msg: dict) -> Optional[EmailAddress]:
     return None
 
 
-# ── Email list: Graph API → IMAP → local DB fallback ───
+# ── Email list: Graph API → IMAP(新) → IMAP(旧) → local DB ───
 
 @router.get("/accounts/{account_id}/emails", response_model=EmailListResponse)
 async def list_emails(
     account_id: int,
     top: int = Query(30, ge=1, le=100),
     skip: int = Query(0, ge=0),
+    folder: str = Query("inbox", description="邮件文件夹: inbox, junkemail, deleteditems"),
     session: AsyncSession = Depends(get_session),
 ):
     result = await session.execute(
@@ -57,12 +69,16 @@ async def list_emails(
     if not account:
         raise HTTPException(404, "账号不存在")
 
+    proxy_url = await _get_proxy_url(account, session)
+    errors = []
+
     # ── Try Graph API first ──
     if account.refresh_token and account.client_id:
         try:
-            await _ensure_token(account, session)
+            await _ensure_token(account, session, proxy_url=proxy_url)
             data = await outlook_client.fetch_emails(
-                account.access_token, top=top, skip=skip
+                account.access_token, top=top, skip=skip,
+                folder=folder, proxy_url=proxy_url
             )
             emails = []
             for msg in data.get("value", []):
@@ -77,12 +93,15 @@ async def list_emails(
                     )
                 )
             total = data.get("@odata.count", len(emails))
-            return EmailListResponse(emails=emails, total=total)
-        except Exception:
-            pass  # Fall through to IMAP / local DB
+            return EmailListResponse(emails=emails, total=total, method="Graph API")
+        except ProxyError as e:
+            # Proxy error: don't fall back to IMAP
+            raise HTTPException(502, f"代理连接错误: {e}")
+        except Exception as e:
+            errors.append(f"Graph API: {e}")
 
-    # ── Try IMAP ──
-    if account.client_id and account.refresh_token:
+    # ── Try IMAP (only for inbox folder) ──
+    if account.client_id and account.refresh_token and folder == "inbox":
         try:
             data = await outlook_client.fetch_emails_imap(
                 account.email, account.password,
@@ -102,9 +121,10 @@ async def list_emails(
                     )
                 )
             total = data.get("@odata.count", len(emails))
-            return EmailListResponse(emails=emails, total=total)
-        except Exception:
-            pass
+            method = data.get("_method", "IMAP")
+            return EmailListResponse(emails=emails, total=total, method=method)
+        except Exception as e:
+            errors.append(str(e))
 
     # ── Fallback: read from local DB ──
     count_q = select(func.count()).where(Email.account_id == account_id)
@@ -134,7 +154,20 @@ async def list_emails(
             )
         )
 
-    return EmailListResponse(emails=emails, total=total)
+    if total > 0:
+        return EmailListResponse(emails=emails, total=total, method="Local DB")
+
+    # All methods failed, return error details
+    if errors:
+        raise HTTPException(
+            502,
+            detail={
+                "message": "所有 API 方式均失败",
+                "errors": errors,
+            }
+        )
+
+    return EmailListResponse(emails=emails, total=total, method="Local DB")
 
 
 # ── Email detail: Graph API → local DB fallback ────────
@@ -152,12 +185,14 @@ async def get_email_detail(
     if not account:
         raise HTTPException(404, "账号不存在")
 
+    proxy_url = await _get_proxy_url(account, session)
+
     # ── Try Graph API first ──
     if account.refresh_token and account.client_id:
         try:
-            await _ensure_token(account, session)
+            await _ensure_token(account, session, proxy_url=proxy_url)
             msg = await outlook_client.fetch_email_detail(
-                account.access_token, message_id
+                account.access_token, message_id, proxy_url=proxy_url
             )
 
             to_list = []
@@ -177,6 +212,8 @@ async def get_email_detail(
                 body_html=body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>",
                 has_attachments=msg.get("hasAttachments", False),
             )
+        except ProxyError as e:
+            raise HTTPException(502, f"代理连接错误: {e}")
         except Exception:
             pass  # Fall through to local DB
 
@@ -204,6 +241,89 @@ async def get_email_detail(
         body_html=f"<pre>{email_record.body_preview or '邮件内容需要通过 IMAP 获取完整正文'}</pre>",
         has_attachments=False,
     )
+
+
+# ── Delete emails ───────────────────────────────────────
+
+@router.delete("/accounts/{account_id}/emails/{message_id}")
+async def delete_email(
+    account_id: int,
+    message_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete an email via Graph API."""
+    result = await session.execute(
+        select(Account).where(Account.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "账号不存在")
+
+    proxy_url = await _get_proxy_url(account, session)
+
+    if account.refresh_token and account.client_id:
+        try:
+            await _ensure_token(account, session, proxy_url=proxy_url)
+            ok = await outlook_client.delete_email(
+                account.access_token, message_id, proxy_url=proxy_url
+            )
+            if ok:
+                return {"message": "邮件已删除"}
+            raise HTTPException(400, "删除失败")
+        except ProxyError as e:
+            raise HTTPException(502, f"代理连接错误: {e}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"删除失败: {e}")
+    else:
+        raise HTTPException(400, "账号未配置 Graph API 凭证，无法删除")
+
+
+@router.post("/accounts/{account_id}/emails/batch-delete")
+async def batch_delete_emails(
+    account_id: int,
+    payload: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """Batch delete emails via Graph API."""
+    message_ids = payload.get("message_ids", [])
+    if not message_ids:
+        raise HTTPException(400, "请选择要删除的邮件")
+
+    result = await session.execute(
+        select(Account).where(Account.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "账号不存在")
+
+    proxy_url = await _get_proxy_url(account, session)
+
+    if not (account.refresh_token and account.client_id):
+        raise HTTPException(400, "账号未配置 Graph API 凭证，无法删除")
+
+    await _ensure_token(account, session, proxy_url=proxy_url)
+
+    success_count = 0
+    fail_count = 0
+    for mid in message_ids:
+        try:
+            ok = await outlook_client.delete_email(
+                account.access_token, mid, proxy_url=proxy_url
+            )
+            if ok:
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception:
+            fail_count += 1
+
+    return {
+        "message": f"删除完成: 成功 {success_count}, 失败 {fail_count}",
+        "success_count": success_count,
+        "fail_count": fail_count,
+    }
 
 
 # ── Local email search ──────────────────────────────────

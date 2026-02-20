@@ -15,6 +15,8 @@ def _build_response(g, count):
         id=g.id,
         name=g.name,
         description=g.description,
+        color=g.color,
+        proxy_url=g.proxy_url,
         auto_sync=g.auto_sync,
         account_count=count,
         created_at=g.created_at,
@@ -54,6 +56,8 @@ async def create_group(
     group = Group(
         name=payload.name,
         description=payload.description,
+        color=payload.color,
+        proxy_url=payload.proxy_url,
         auto_sync=payload.auto_sync,
     )
     session.add(group)
@@ -84,6 +88,10 @@ async def update_group(
         group.name = payload.name
     if payload.description is not None:
         group.description = payload.description
+    if payload.color is not None:
+        group.color = payload.color
+    if payload.proxy_url is not None:
+        group.proxy_url = payload.proxy_url
     if payload.auto_sync is not None:
         group.auto_sync = payload.auto_sync
 

@@ -46,10 +46,10 @@ def _add_log(level: str, email: str, message: str):
     })
 
 
-async def _save_emails(session, account: Account, access_token: str):
+async def _save_emails(session, account: Account, access_token: str, proxy_url: str = None):
     """Fetch latest emails from Graph API and save new ones to local DB."""
     try:
-        data = await outlook_client.fetch_emails(access_token, top=30)
+        data = await outlook_client.fetch_emails(access_token, top=30, proxy_url=proxy_url)
         messages = data.get("value", [])
         if not messages:
             return 0
@@ -213,9 +213,19 @@ async def sync_one_account():
             f"⏱ 第{_current_round}轮 错峰同步: 第 {idx + 1}/{total} 个账号 — {account.email}"
         )
 
+        # Get proxy_url from group
+        proxy_url = None
+        if account.group_id:
+            grp_result = await session.execute(
+                select(Group).where(Group.id == account.group_id)
+            )
+            grp = grp_result.scalar_one_or_none()
+            if grp and grp.proxy_url:
+                proxy_url = grp.proxy_url
+
         try:
             token_data = await outlook_client.refresh_access_token(
-                account.client_id, account.refresh_token
+                account.client_id, account.refresh_token, proxy_url=proxy_url
             )
             account.access_token = token_data["access_token"]
             account.refresh_token = token_data["refresh_token"]
@@ -223,7 +233,7 @@ async def sync_one_account():
                 seconds=token_data["expires_in"]
             )
 
-            unread = await outlook_client.get_unread_count(account.access_token)
+            unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
             old_unread = account.unread_count or 0
 
             if unread > old_unread:
@@ -239,7 +249,7 @@ async def sync_one_account():
             account.last_error = None
 
             # Save emails to local DB
-            saved = await _save_emails(session, account, account.access_token)
+            saved = await _save_emails(session, account, account.access_token, proxy_url=proxy_url)
             if saved > 0:
                 _add_log("info", account.email, f"保存了 {saved} 封新邮件到本地")
                 logger.info(f"💾 {account.email}: 保存了 {saved} 封新邮件到本地")
@@ -295,6 +305,97 @@ def get_sync_log():
     return list(sync_log)
 
 
+async def auto_refresh_all_tokens():
+    """Scheduled job: refresh all account tokens."""
+    logger.info("⏰ 定时刷新 Token 开始")
+    _add_log("info", "-", "定时刷新 Token 开始")
+
+    from routes.refresh import _do_refresh_one
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Account).where(Account.refresh_token.isnot(None))
+        )
+        accounts = list(result.scalars().all())
+        success_count = 0
+        fail_count = 0
+
+        for account in accounts:
+            ok, err = await _do_refresh_one(account, session, refresh_type="auto")
+            if ok:
+                success_count += 1
+            else:
+                fail_count += 1
+
+        _add_log("info", "-",
+                 f"定时刷新完成: 成功 {success_count}, 失败 {fail_count}")
+        logger.info(f"⏰ 定时刷新完成: 成功 {success_count}, 失败 {fail_count}")
+
+
+async def init_refresh_schedule():
+    """Load timed refresh config from settings DB and schedule if enabled."""
+    try:
+        from models import Setting
+        async with async_session() as session:
+            # Check if refresh is enabled
+            result = await session.execute(
+                select(Setting).where(Setting.key == "refresh_enabled")
+            )
+            enabled_setting = result.scalar_one_or_none()
+            if not enabled_setting or enabled_setting.value != "true":
+                logger.info("定时刷新未启用")
+                return
+
+            # Get refresh mode
+            result = await session.execute(
+                select(Setting).where(Setting.key == "refresh_mode")
+            )
+            mode_setting = result.scalar_one_or_none()
+            mode = mode_setting.value if mode_setting else "days"
+
+            if mode == "cron":
+                result = await session.execute(
+                    select(Setting).where(Setting.key == "refresh_cron")
+                )
+                cron_setting = result.scalar_one_or_none()
+                if cron_setting and cron_setting.value:
+                    from croniter import croniter
+                    parts = cron_setting.value.strip().split()
+                    if len(parts) == 5:
+                        scheduler.add_job(
+                            auto_refresh_all_tokens,
+                            "cron",
+                            minute=parts[0],
+                            hour=parts[1],
+                            day=parts[2],
+                            month=parts[3],
+                            day_of_week=parts[4],
+                            id="token_refresh",
+                            replace_existing=True,
+                        )
+                        logger.info(f"定时刷新已配置 (cron: {cron_setting.value})")
+                        _add_log("info", "-", f"定时刷新已配置 (cron: {cron_setting.value})")
+                    return
+            else:
+                result = await session.execute(
+                    select(Setting).where(Setting.key == "refresh_days")
+                )
+                days_setting = result.scalar_one_or_none()
+                days = int(days_setting.value) if days_setting and days_setting.value else 30
+                scheduler.add_job(
+                    auto_refresh_all_tokens,
+                    "interval",
+                    days=days,
+                    id="token_refresh",
+                    replace_existing=True,
+                )
+                logger.info(f"定时刷新已配置 (每 {days} 天)")
+                _add_log("info", "-", f"定时刷新已配置 (每 {days} 天)")
+
+    except Exception as e:
+        logger.warning(f"加载定时刷新配置失败: {e}")
+
+
 def start_scheduler():
     scheduler.add_job(
         sync_one_account,
@@ -309,6 +410,10 @@ def start_scheduler():
         f"调度器已启动，每 {STAGGER_INTERVAL_MINUTES} 分钟同步 1 个账号，"
         f"每轮完成后冷却 {ROUND_COOLDOWN_HOURS} 小时"
     )
+
+    # Load timed refresh schedule (must be done after scheduler starts)
+    import asyncio
+    asyncio.get_event_loop().create_task(init_refresh_schedule())
 
 
 def stop_scheduler():

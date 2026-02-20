@@ -4,12 +4,22 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
+class Setting(Base):
+    __tablename__ = "settings"
+
+    key = Column(String(255), primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Group(Base):
     __tablename__ = "groups"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
     description = Column(String(500), nullable=True)
+    color = Column(String(50), nullable=True)
+    proxy_url = Column(String(500), nullable=True)
     auto_sync = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -33,11 +43,15 @@ class Account(Base):
     imap_enabled = Column(Boolean, nullable=True, default=None)
     pop3_enabled = Column(Boolean, nullable=True, default=None)
     graph_enabled = Column(Boolean, nullable=True, default=None)
+    remark = Column(String(500), nullable=True)
+    last_refresh_at = Column(DateTime, nullable=True)
+    refresh_status = Column(String(50), default="unknown")  # unknown / success / failed
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     group = relationship("Group", back_populates="accounts", lazy="selectin")
     emails = relationship("Email", back_populates="account", cascade="all, delete-orphan", lazy="noload")
+    refresh_logs = relationship("RefreshLog", back_populates="account", cascade="all, delete-orphan", lazy="noload")
 
 
 class Email(Base):
@@ -60,3 +74,17 @@ class Email(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     account = relationship("Account", back_populates="emails", lazy="selectin")
+
+
+class RefreshLog(Base):
+    __tablename__ = "refresh_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_email = Column(String(255), nullable=False)
+    refresh_type = Column(String(50), nullable=False)  # manual / auto / retry
+    status = Column(String(50), nullable=False)  # success / failed
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    account = relationship("Account", back_populates="refresh_logs", lazy="selectin")

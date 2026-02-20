@@ -18,6 +18,8 @@ from models import Account
 from routes.accounts import router as accounts_router
 from routes.emails import router as emails_router
 from routes.groups import router as groups_router
+from routes.settings import router as settings_router
+from routes.refresh import router as refresh_router
 from scheduler import start_scheduler, stop_scheduler, new_email_events, get_sync_status, get_sync_log
 from config import AUTH_USERNAME, AUTH_PASSWORD, AUTH_SECRET, DEFAULT_CLIENT_ID
 
@@ -109,7 +111,21 @@ async def login(request: Request):
     username = body.get("username", "")
     password = body.get("password", "")
 
-    if username == AUTH_USERNAME and password == AUTH_PASSWORD:
+    # Check password from settings first, then env
+    current_password = AUTH_PASSWORD
+    try:
+        from models import Setting
+        async with async_session() as session:
+            result = await session.execute(
+                select(Setting).where(Setting.key == "auth_password")
+            )
+            setting = result.scalar_one_or_none()
+            if setting and setting.value:
+                current_password = setting.value
+    except Exception:
+        pass
+
+    if username == AUTH_USERNAME and password == current_password:
         token = _make_token(username)
         return {"token": token, "username": username}
 
@@ -201,6 +217,8 @@ async def device_code_poll(account_id: int):
 app.include_router(groups_router)
 app.include_router(accounts_router)
 app.include_router(emails_router)
+app.include_router(settings_router)
+app.include_router(refresh_router)
 
 
 @app.get("/api/notifications")

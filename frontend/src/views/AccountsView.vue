@@ -5,6 +5,8 @@
       <h1 style="font-size: 1.5rem; font-weight: 700;">📋 账号管理</h1>
       <div style="display: flex; gap: 10px;">
         <button class="btn btn-secondary" @click="showGroupModal = true">📁 管理分组</button>
+        <button class="btn btn-secondary" @click="startRefreshAll" :disabled="refreshingAll">🔁 {{ refreshingAll ? '刷新中...' : '全量刷新Token' }}</button>
+        <button class="btn btn-secondary" @click="showSettingsModal = true">⚙️ 设置</button>
         <button class="btn btn-secondary" @click="showBatchModal = true">📥 批量导入</button>
         <button class="btn btn-secondary" @click="handleExport">📤 导出</button>
         <button class="btn btn-primary" @click="showAddModal = true">➕ 添加账号</button>
@@ -30,7 +32,9 @@
         :class="{ active: filterGroupId === group.id }"
         @click="filterByGroup(group.id)"
       >
+        <span v-if="group.color" :style="{display:'inline-block',width:'8px',height:'8px',borderRadius:'50%',background:group.color,marginRight:'4px'}"></span>
         {{ group.name }}
+        <span v-if="group.proxy_url" style="font-size:0.7rem;margin-left:2px;">🌐</span>
         <span class="chip-unread" v-if="group.account_count > 0">{{ group.account_count }}</span>
       </div>
     </div>
@@ -177,6 +181,7 @@
                   <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
                 </th>
                 <th>邮箱地址</th>
+                <th>备注</th>
                 <th>分组</th>
                 <th>状态</th>
                 <th>协议</th>
@@ -190,7 +195,8 @@
                 <td>
                   <input type="checkbox" :value="account.id" v-model="selectedIds" />
                 </td>
-                <td style="font-weight: 500;">{{ account.email }}</td>
+                <td :style="{fontWeight: account.refresh_status==='failed' ? 700 : 500, color: account.refresh_status==='failed' ? '#ef4444' : 'inherit'}">{{ account.email }}</td>
+                <td style="font-size:0.8rem;color:var(--text-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="account.remark">{{ account.remark || '—' }}</td>
                 <td>
                   <select
                     class="form-input"
@@ -291,6 +297,7 @@
                   <div class="email-modal-account">{{ emailViewAccount.email }}</div>
                   <div class="email-modal-subtitle">
                     {{ emailsStore.loading ? '加载中...' : `${emailList.length} 封邮件` }}
+                    <span v-if="emailsStore.method" style="font-size:0.7rem;padding:1px 6px;background:rgba(99,102,241,0.15);border-radius:6px;color:var(--accent-light);">{{ emailsStore.method }}</span>
                     <span v-if="emailViewAccount.unread_count > 0" class="email-modal-unread-badge">
                       {{ emailViewAccount.unread_count }} 未读
                     </span>
@@ -307,6 +314,13 @@
                 </button>
                 <button class="email-modal-btn email-modal-close" @click="closeEmailModal" title="关闭">✕</button>
               </div>
+            </div>
+
+            <!-- Folder Tabs -->
+            <div v-if="!viewingDetail" style="display:flex;gap:0;border-bottom:1px solid rgba(255,255,255,0.06);">
+              <button v-for="f in folders" :key="f.value" @click="switchFolder(f.value)" :style="{padding:'10px 18px',fontSize:'0.82rem',border:'none',background:emailFolder===f.value?'rgba(99,102,241,0.1)':'transparent',color:emailFolder===f.value?'var(--accent-light)':'rgba(255,255,255,0.5)',borderBottom:emailFolder===f.value?'2px solid var(--accent)':'2px solid transparent',cursor:'pointer',transition:'all 0.2s'}">
+                {{ f.icon }} {{ f.label }}
+              </button>
             </div>
 
             <!-- Email List View -->
@@ -421,6 +435,10 @@
             <label class="form-label">Refresh Token <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
             <textarea class="form-textarea" v-model="form.refresh_token" rows="3" placeholder="Refresh Token"></textarea>
           </div>
+          <div class="form-group">
+            <label class="form-label">备注 <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
+            <input class="form-input" v-model="form.remark" placeholder="备注信息" />
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="showAddModal = false">取消</button>
@@ -455,7 +473,7 @@
               placeholder="一行一个账号，格式：邮箱----密码 或 邮箱----密码----client_id----refresh_token"
             ></textarea>
             <div class="form-hint">
-              格式: <code>邮箱----密码</code> 或 <code>邮箱----密码----client_id----refresh_token</code>，每行一个
+              格式: <code>邮箱----密码</code> 或 <code>邮箱----密码----client_id----refresh_token</code> 或 <code>邮箱----密码----client_id----refresh_token----备注</code>，每行一个
             </div>
           </div>
 
@@ -496,13 +514,20 @@
         </div>
         <div class="modal-body">
           <!-- Create Group -->
-          <div style="display: flex; gap: 8px; margin-bottom: 20px;">
+          <div style="display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;">
             <input
               class="form-input"
               v-model="newGroupName"
               placeholder="新分组名称"
               @keyup.enter="handleCreateGroup"
-              style="flex: 1;"
+              style="flex: 1; min-width: 120px;"
+            />
+            <input type="color" v-model="newGroupColor" style="width:36px;height:36px;border:none;border-radius:6px;cursor:pointer;padding:0;" title="分组颜色" />
+            <input
+              class="form-input"
+              v-model="newGroupProxy"
+              placeholder="代理URL (http/socks5)"
+              style="min-width: 180px;"
             />
             <button class="btn btn-primary" @click="handleCreateGroup" :disabled="!newGroupName.trim()">
               创建
@@ -519,13 +544,22 @@
             style="display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border);"
           >
             <div style="flex: 1;">
-              <div style="font-weight: 500;">{{ group.name }}</div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span v-if="group.color" :style="{display:'inline-block',width:'10px',height:'10px',borderRadius:'50%',background:group.color}"></span>
+                <span style="font-weight: 500;">{{ group.name }}</span>
+                <span v-if="group.proxy_url" style="font-size:0.72rem;padding:1px 6px;background:rgba(99,102,241,0.1);border-radius:4px;color:var(--accent-light);">{{ group.proxy_url }}</span>
+              </div>
               <div style="font-size: 0.8rem; color: var(--text-muted);">
                 {{ group.account_count }} 个账号
                 <span v-if="group.description"> · {{ group.description }}</span>
               </div>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
+              <button
+                class="btn btn-sm btn-secondary"
+                @click="editGroup(group)"
+                title="编辑"
+              >✏️</button>
               <button
                 class="btn btn-sm"
                 :class="group.auto_sync ? 'btn-primary' : 'btn-secondary'"
@@ -586,6 +620,112 @@
         </div>
       </div>
     </div>
+
+    <!-- Settings Modal -->
+    <div v-if="showSettingsModal" class="modal-overlay" @click.self="showSettingsModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>⚙️ 系统设置</h3>
+          <button class="btn btn-icon btn-secondary" @click="showSettingsModal = false">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">修改密码</label>
+            <input class="form-input" v-model="settingsOldPwd" type="password" placeholder="旧密码" style="margin-bottom:8px;" />
+            <input class="form-input" v-model="settingsNewPwd" type="password" placeholder="新密码" />
+          </div>
+          <button class="btn btn-primary btn-sm" @click="handleChangePassword" style="margin-bottom:16px;">修改密码</button>
+          <div class="form-group">
+            <label class="form-label">GPTMail API Key</label>
+            <input class="form-input" v-model="settingsApiKey" placeholder="API Key" />
+          </div>
+          <hr style="border-color:var(--border);margin:16px 0;" />
+          <div class="form-group">
+            <label class="form-label">定时刷新 Token</label>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <label><input type="checkbox" v-model="refreshEnabled" /> 启用定时刷新</label>
+            </div>
+            <div v-if="refreshEnabled">
+              <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
+                <label><input type="radio" v-model="refreshMode" value="days" /> 按天数</label>
+                <label><input type="radio" v-model="refreshMode" value="cron" /> Cron 表达式</label>
+              </div>
+              <input v-if="refreshMode==='days'" class="form-input" v-model="refreshDays" type="number" placeholder="每 N 天刷新一次" style="width:200px;" />
+              <div v-else>
+                <input class="form-input" v-model="refreshCron" placeholder="0 3 * * *" style="margin-bottom:4px;" />
+                <div style="font-size:0.78rem;color:var(--text-muted);">示例: <code>0 3 * * *</code> 每天凌晨3点, <code>0 */6 * * *</code> 每6小时</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="showSettingsModal = false">关闭</button>
+          <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Refresh Progress Modal -->
+    <div v-if="refreshingAll" class="modal-overlay">
+      <div class="modal" style="max-width: 500px;">
+        <div class="modal-header">
+          <h3>🔁 全量刷新 Token</h3>
+        </div>
+        <div class="modal-body">
+          <div style="margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:4px;">
+              <span>进度: {{ refreshProgress.current }} / {{ refreshProgress.total }}</span>
+              <span>✅ {{ refreshProgress.success }} ❌ {{ refreshProgress.fail }}</span>
+            </div>
+            <div style="width:100%;height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;">
+              <div :style="{width: refreshProgress.total ? (refreshProgress.current/refreshProgress.total*100)+'%' : '0%', height:'100%', background:'linear-gradient(90deg,#6366f1,#8b5cf6)', borderRadius:'4px', transition:'width 0.3s'}"></div>
+            </div>
+          </div>
+          <div v-if="refreshProgress.lastEmail" style="font-size:0.82rem;color:var(--text-muted);">
+            {{ refreshProgress.lastOk ? '✅' : '❌' }} {{ refreshProgress.lastEmail }}
+            <span v-if="refreshProgress.lastError" style="color:var(--danger);"> - {{ refreshProgress.lastError }}</span>
+          </div>
+          <div v-if="refreshProgress.done" style="margin-top:16px;text-align:center;">
+            <p style="font-size:1.1rem;font-weight:600;">刷新完成！</p>
+            <p>成功 <span style="color:var(--success);font-weight:600;">{{ refreshProgress.success }}</span>，失败 <span style="color:var(--danger);font-weight:600;">{{ refreshProgress.fail }}</span></p>
+            <button class="btn btn-primary" @click="refreshingAll = false; accountsStore.fetchAccounts()" style="margin-top:12px;">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Group Edit Modal -->
+    <div v-if="editingGroup" class="modal-overlay" @click.self="editingGroup = null">
+      <div class="modal" style="max-width: 420px;">
+        <div class="modal-header">
+          <h3>✏️ 编辑分组</h3>
+          <button class="btn btn-icon btn-secondary" @click="editingGroup = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">分组名称</label>
+            <input class="form-input" v-model="editingGroup.name" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">颜色</label>
+            <input type="color" v-model="editingGroup.color" style="width:48px;height:36px;border:none;border-radius:6px;cursor:pointer;" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">代理 URL</label>
+            <input class="form-input" v-model="editingGroup.proxy_url" placeholder="http://host:port 或 socks5://host:port" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">描述</label>
+            <input class="form-input" v-model="editingGroup.description" placeholder="分组描述 (可选)" />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="editingGroup = null">取消</button>
+          <button class="btn btn-primary" @click="saveEditGroup">保存</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -697,8 +837,9 @@ function toggleEmailView(account) {
   } else {
     emailViewAccount.value = account
     viewingDetail.value = false
+    emailFolder.value = 'inbox'
     emailsStore.clearDetail()
-    emailsStore.fetchEmails(account.id)
+    emailsStore.fetchEmails(account.id, 30, 0, 'inbox')
   }
 }
 
@@ -711,7 +852,7 @@ function closeEmailModal() {
 
 function refreshEmails() {
   if (emailViewAccount.value) {
-    emailsStore.fetchEmails(emailViewAccount.value.id)
+    emailsStore.fetchEmails(emailViewAccount.value.id, 30, 0, emailFolder.value)
   }
 }
 
@@ -735,7 +876,7 @@ function formatDetailTime(iso) {
 // Add form
 const showAddModal = ref(false)
 const adding = ref(false)
-const form = ref({ email: '', password: '', client_id: '', refresh_token: '', group_id: null })
+const form = ref({ email: '', password: '', client_id: '', refresh_token: '', group_id: null, remark: '' })
 
 // Batch import
 const showBatchModal = ref(false)
@@ -747,6 +888,40 @@ const batchGroupId = ref(null)
 // Group management
 const showGroupModal = ref(false)
 const newGroupName = ref('')
+const newGroupColor = ref('#6366f1')
+const newGroupProxy = ref('')
+const editingGroup = ref(null)
+
+// Folder tabs
+const emailFolder = ref('inbox')
+const folders = [
+  { value: 'inbox', label: '收件箱', icon: '📥' },
+  { value: 'junkemail', label: '垃圾邮件', icon: '🗑️' },
+  { value: 'deleteditems', label: '已删除', icon: '🗂️' },
+]
+
+function switchFolder(folder) {
+  emailFolder.value = folder
+  if (emailViewAccount.value) {
+    viewingDetail.value = false
+    emailsStore.clearDetail()
+    emailsStore.fetchEmails(emailViewAccount.value.id, 30, 0, folder)
+  }
+}
+
+// Settings
+const showSettingsModal = ref(false)
+const settingsOldPwd = ref('')
+const settingsNewPwd = ref('')
+const settingsApiKey = ref('')
+const refreshEnabled = ref(false)
+const refreshMode = ref('days')
+const refreshDays = ref(30)
+const refreshCron = ref('0 3 * * *')
+
+// Token refresh
+const refreshingAll = ref(false)
+const refreshProgress = ref({ current: 0, total: 0, success: 0, fail: 0, done: false, lastEmail: '', lastOk: true, lastError: '' })
 
 // Delete
 const deleteTarget = ref(null)
@@ -887,7 +1062,7 @@ async function handleAdd() {
     groupsStore.fetchGroups()
     notifStore.addToast('账号添加成功', 'success')
     showAddModal.value = false
-    form.value = { email: '', password: '', client_id: '', refresh_token: '', group_id: null }
+    form.value = { email: '', password: '', client_id: '', refresh_token: '', group_id: null, remark: '' }
   } catch (e) {
     notifStore.addToast(e.response?.data?.detail || '添加失败', 'error')
   } finally {
@@ -919,11 +1094,36 @@ async function handleBatchImport() {
 async function handleCreateGroup() {
   if (!newGroupName.value.trim()) return
   try {
-    await groupsStore.createGroup({ name: newGroupName.value.trim() })
+    await groupsStore.createGroup({
+      name: newGroupName.value.trim(),
+      color: newGroupColor.value || null,
+      proxy_url: newGroupProxy.value.trim() || null,
+    })
     newGroupName.value = ''
+    newGroupProxy.value = ''
     notifStore.addToast('分组创建成功', 'success')
   } catch (e) {
     notifStore.addToast(e.response?.data?.detail || '创建失败', 'error')
+  }
+}
+
+function editGroup(group) {
+  editingGroup.value = { ...group }
+}
+
+async function saveEditGroup() {
+  if (!editingGroup.value) return
+  try {
+    await groupsStore.updateGroup(editingGroup.value.id, {
+      name: editingGroup.value.name,
+      color: editingGroup.value.color,
+      proxy_url: editingGroup.value.proxy_url || null,
+      description: editingGroup.value.description || null,
+    })
+    editingGroup.value = null
+    notifStore.addToast('分组已更新', 'success')
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '更新失败', 'error')
   }
 }
 
@@ -1096,8 +1296,93 @@ function openSearchEmail(email) {
   }
 }
 
+// Settings functions
+async function loadSettings() {
+  try {
+    const { data } = await axios.get('/api/settings')
+    settingsApiKey.value = data.gptmail_api_key || ''
+    refreshEnabled.value = data.refresh_enabled === 'true'
+    refreshMode.value = data.refresh_mode || 'days'
+    refreshDays.value = parseInt(data.refresh_days) || 30
+    refreshCron.value = data.refresh_cron || '0 3 * * *'
+  } catch { /* ignore */ }
+}
+
+async function saveSettings() {
+  try {
+    await axios.put('/api/settings', {
+      settings: [
+        { key: 'gptmail_api_key', value: settingsApiKey.value },
+        { key: 'refresh_enabled', value: refreshEnabled.value ? 'true' : 'false' },
+        { key: 'refresh_mode', value: refreshMode.value },
+        { key: 'refresh_days', value: String(refreshDays.value) },
+        { key: 'refresh_cron', value: refreshCron.value },
+      ]
+    })
+    notifStore.addToast('设置已保存', 'success')
+    showSettingsModal.value = false
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '保存失败', 'error')
+  }
+}
+
+async function handleChangePassword() {
+  if (!settingsOldPwd.value || !settingsNewPwd.value) {
+    notifStore.addToast('请填写旧密码和新密码', 'error')
+    return
+  }
+  try {
+    await axios.put('/api/settings/password', {
+      old_password: settingsOldPwd.value,
+      new_password: settingsNewPwd.value,
+    })
+    settingsOldPwd.value = ''
+    settingsNewPwd.value = ''
+    notifStore.addToast('密码已修改', 'success')
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '修改失败', 'error')
+  }
+}
+
+// SSE Token Refresh
+function startRefreshAll() {
+  refreshingAll.value = true
+  refreshProgress.value = { current: 0, total: 0, success: 0, fail: 0, done: false, lastEmail: '', lastOk: true, lastError: '' }
+
+  const token = localStorage.getItem('token')
+  const evtSource = new EventSource(`/api/accounts/refresh-all?token=${token}`)
+
+  evtSource.onmessage = (event) => {
+    try {
+      const d = JSON.parse(event.data)
+      if (d.type === 'start') {
+        refreshProgress.value.total = d.total
+      } else if (d.type === 'progress') {
+        refreshProgress.value.current = d.current
+        refreshProgress.value.success = d.success_count
+        refreshProgress.value.fail = d.fail_count
+        refreshProgress.value.lastEmail = d.email
+        refreshProgress.value.lastOk = d.success
+        refreshProgress.value.lastError = d.error || ''
+      } else if (d.type === 'done') {
+        refreshProgress.value.done = true
+        refreshProgress.value.current = d.total
+        refreshProgress.value.success = d.success_count
+        refreshProgress.value.fail = d.fail_count
+        evtSource.close()
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  evtSource.onerror = () => {
+    refreshProgress.value.done = true
+    evtSource.close()
+  }
+}
+
 onMounted(() => {
   groupsStore.fetchGroups()
+  loadSettings()
 })
 </script>
 

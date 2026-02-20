@@ -8,12 +8,16 @@ from datetime import datetime
 class GroupCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    color: Optional[str] = None
+    proxy_url: Optional[str] = None
     auto_sync: bool = False
 
 
 class GroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    color: Optional[str] = None
+    proxy_url: Optional[str] = None
     auto_sync: Optional[bool] = None
 
 
@@ -21,6 +25,8 @@ class GroupResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
+    color: Optional[str] = None
+    proxy_url: Optional[str] = None
     auto_sync: bool = False
     account_count: int = 0
     created_at: datetime
@@ -37,6 +43,7 @@ class AccountCreate(BaseModel):
     client_id: Optional[str] = None
     refresh_token: Optional[str] = None
     group_id: Optional[int] = None
+    remark: Optional[str] = None
 
 
 class AccountResponse(BaseModel):
@@ -50,6 +57,9 @@ class AccountResponse(BaseModel):
     imap_enabled: Optional[bool] = None
     pop3_enabled: Optional[bool] = None
     graph_enabled: Optional[bool] = None
+    remark: Optional[str] = None
+    last_refresh_at: Optional[datetime] = None
+    refresh_status: str = "unknown"
     last_synced: Optional[datetime] = None
     last_error: Optional[str] = None
     created_at: datetime
@@ -104,6 +114,7 @@ class EmailDetail(BaseModel):
 class EmailListResponse(BaseModel):
     emails: List[EmailSummary]
     total: int
+    method: Optional[str] = None  # "Graph API" / "IMAP (New)" / "IMAP (Old)" / "Local DB"
 
 
 class SyncStatus(BaseModel):
@@ -133,3 +144,41 @@ class LocalEmailSummary(BaseModel):
 class SearchEmailResponse(BaseModel):
     results: List[LocalEmailSummary]
     total: int
+
+
+# ── Settings ────────────────────────────────────────────
+
+class SettingItem(BaseModel):
+    key: str
+    value: Optional[str] = None
+
+
+class SettingsUpdate(BaseModel):
+    settings: List[SettingItem]
+
+
+class PasswordChange(BaseModel):
+    old_password: str
+    new_password: str
+
+
+# ── Refresh ─────────────────────────────────────────────
+
+class RefreshLogResponse(BaseModel):
+    id: int
+    account_id: int
+    account_email: str
+    refresh_type: str
+    status: str
+    error_message: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RefreshStatsResponse(BaseModel):
+    total: int
+    success: int
+    failed: int
+    unknown: int

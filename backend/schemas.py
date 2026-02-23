@@ -11,6 +11,10 @@ class GroupCreate(BaseModel):
     color: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_sync: bool = False
+    sync_interval_minutes: int = 2
+    sync_batch_size: int = 1
+    auto_refresh_token: bool = True
+    refresh_interval_hours: int = 24
 
 
 class GroupUpdate(BaseModel):
@@ -19,6 +23,10 @@ class GroupUpdate(BaseModel):
     color: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_sync: Optional[bool] = None
+    sync_interval_minutes: Optional[int] = None
+    sync_batch_size: Optional[int] = None
+    auto_refresh_token: Optional[bool] = None
+    refresh_interval_hours: Optional[int] = None
 
 
 class GroupResponse(BaseModel):
@@ -28,6 +36,10 @@ class GroupResponse(BaseModel):
     color: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_sync: bool = False
+    sync_interval_minutes: int = 2
+    sync_batch_size: int = 1
+    auto_refresh_token: bool = True
+    refresh_interval_hours: int = 24
     account_count: int = 0
     created_at: datetime
 

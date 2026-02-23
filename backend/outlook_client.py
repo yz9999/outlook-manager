@@ -24,6 +24,15 @@ IMAP_SERVER_OLD = "outlook.office365.com"
 IMAP_SERVER_NEW = "outlook.live.com"
 IMAP_PORT = 993
 
+# Map Graph API folder names to IMAP folder names
+IMAP_FOLDER_MAP = {
+    "inbox": "INBOX",
+    "junkemail": "Junk",
+    "deleteditems": "Deleted",
+    "sentitems": "Sent",
+    "drafts": "Drafts",
+}
+
 
 class ProxyError(Exception):
     """Raised when a proxy connection fails."""
@@ -266,7 +275,7 @@ class OutlookClient:
     async def fetch_emails_imap(
         self, user_email: str, password: str,
         client_id: str = None, refresh_token: str = None,
-        top: int = 30, method: str = None,
+        top: int = 30, method: str = None, folder: str = "inbox",
     ) -> Dict[str, Any]:
         """Fetch emails via IMAP. Tries new method first, then old method.
         Reference: https://github.com/xiaozhi349/outlookEmail
@@ -284,7 +293,7 @@ class OutlookClient:
                 try:
                     result = await asyncio.to_thread(
                         self._fetch_imap_emails, user_email, token_new,
-                        IMAP_SERVER_NEW, top)
+                        IMAP_SERVER_NEW, top, folder)
                     result["_method"] = "IMAP (New)"
                     logger.info(f"新版 IMAP 成功 for {user_email}")
                     return result
@@ -301,7 +310,7 @@ class OutlookClient:
                 try:
                     result = await asyncio.to_thread(
                         self._fetch_imap_emails, user_email, token_old,
-                        IMAP_SERVER_OLD, top)
+                        IMAP_SERVER_OLD, top, folder)
                     result["_method"] = "IMAP (Old)"
                     logger.info(f"旧版 IMAP 成功 for {user_email}")
                     return result
@@ -314,7 +323,7 @@ class OutlookClient:
         raise Exception("IMAP 新版和旧版均失败: " + "; ".join(errors))
 
     def _fetch_imap_emails(self, user_email: str, access_token: str,
-                           imap_server: str, top: int) -> Dict[str, Any]:
+                           imap_server: str, top: int, folder: str = "inbox") -> Dict[str, Any]:
         """Synchronous IMAP fetch, matching reference project's approach."""
         connection = imaplib.IMAP4_SSL(imap_server, IMAP_PORT)
         try:
@@ -322,11 +331,12 @@ class OutlookClient:
             auth_string = self._build_xoauth2_string(user_email, access_token).encode("utf-8")
             connection.authenticate("XOAUTH2", lambda x: auth_string)
 
-            # Select INBOX (reference uses '"INBOX"' for new server)
+            # Select folder (map Graph API folder name to IMAP name)
+            imap_folder = IMAP_FOLDER_MAP.get(folder, "INBOX")
             if imap_server == IMAP_SERVER_NEW:
-                connection.select('"INBOX"')
+                connection.select(f'"{imap_folder}"')
             else:
-                connection.select("INBOX")
+                connection.select(imap_folder)
 
             # Search all
             status, messages = connection.search(None, "ALL")
@@ -348,7 +358,7 @@ class OutlookClient:
             result_emails = []
             for msg_id in recent_ids:
                 try:
-                    status, msg_data = connection.fetch(msg_id, "(RFC822)")
+                    status, msg_data = connection.fetch(msg_id, "(BODY.PEEK[])")
                     if status != "OK" or not msg_data or not msg_data[0]:
                         continue
 
@@ -399,7 +409,7 @@ class OutlookClient:
                             }
                         },
                         "receivedDateTime": received_at,
-                        "isRead": True,  # IMAP RFC822 doesn't include FLAGS
+                        "isRead": True,  # IMAP PEEK doesn't include FLAGS
                         "bodyPreview": body_preview[:500],
                     })
                 except Exception as e:
@@ -410,6 +420,155 @@ class OutlookClient:
                 "value": result_emails,
                 "@odata.count": total,
                 "_unread_count": unread_count,
+            }
+        finally:
+            try:
+                connection.logout()
+            except Exception:
+                pass
+
+    async def fetch_email_detail_imap(
+        self, user_email: str, password: str,
+        client_id: str = None, refresh_token: str = None,
+        message_id: str = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a single email's full detail via IMAP by Message-ID."""
+        if not client_id or not refresh_token or not message_id:
+            return None
+
+        # Try new IMAP first, then old
+        for get_token, server in [
+            (self._get_imap_token_new, IMAP_SERVER_NEW),
+            (self._get_imap_token_old, IMAP_SERVER_OLD),
+        ]:
+            token = await get_token(client_id, refresh_token)
+            if token:
+                try:
+                    result = await asyncio.to_thread(
+                        self._fetch_imap_email_by_id,
+                        user_email, token, server, message_id,
+                    )
+                    if result:
+                        return result
+                except Exception as e:
+                    logger.info(f"IMAP detail fetch failed via {server}: {e}")
+        return None
+
+    def _fetch_imap_email_by_id(
+        self, user_email: str, access_token: str,
+        imap_server: str, target_message_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Synchronous: search IMAP for a specific Message-ID and return full detail."""
+        connection = imaplib.IMAP4_SSL(imap_server, IMAP_PORT)
+        try:
+            auth_string = self._build_xoauth2_string(user_email, access_token).encode("utf-8")
+            connection.authenticate("XOAUTH2", lambda x: auth_string)
+
+            if imap_server == IMAP_SERVER_NEW:
+                connection.select('"INBOX"')
+            else:
+                connection.select("INBOX")
+
+            # Search by Message-ID header
+            clean_id = target_message_id.strip("<>")
+            status, data = connection.search(None, f'HEADER Message-ID "<{clean_id}>"')
+            if status != "OK" or not data or not data[0]:
+                return None
+
+            msg_ids = data[0].split()
+            if not msg_ids:
+                return None
+
+            # Fetch the first match
+            status, msg_data = connection.fetch(msg_ids[0], "(BODY.PEEK[])")
+            if status != "OK" or not msg_data or not msg_data[0]:
+                return None
+
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+
+            subject = _decode_header_str(msg.get("Subject", ""))
+            from_raw = msg.get("From", "")
+            from_name, from_addr = parseaddr(from_raw)
+            from_name = _decode_header_str(from_name) if from_name else ""
+
+            # Parse To recipients
+            to_list = []
+            to_raw = msg.get("To", "")
+            if to_raw:
+                # Simple comma split for multiple recipients
+                for part in to_raw.split(","):
+                    name, addr = parseaddr(part.strip())
+                    name = _decode_header_str(name) if name else ""
+                    if addr:
+                        to_list.append({"name": name, "address": addr})
+
+            received_at = None
+            date_str = msg.get("Date")
+            if date_str:
+                try:
+                    received_at = parsedate_to_datetime(date_str).isoformat()
+                except Exception:
+                    pass
+
+            # Extract full body (prefer HTML, fallback to plain text)
+            body_html = None
+            body_plain = None
+            has_attachments = False
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    disp = str(part.get("Content-Disposition", ""))
+                    if "attachment" in disp:
+                        has_attachments = True
+                        continue
+                    if ct == "text/html" and body_html is None:
+                        try:
+                            body_html = part.get_payload(decode=True).decode(
+                                part.get_content_charset() or "utf-8", errors="replace")
+                        except Exception:
+                            pass
+                    elif ct == "text/plain" and body_plain is None:
+                        try:
+                            body_plain = part.get_payload(decode=True).decode(
+                                part.get_content_charset() or "utf-8", errors="replace")
+                        except Exception:
+                            pass
+            else:
+                ct = msg.get_content_type()
+                try:
+                    text = msg.get_payload(decode=True).decode(
+                        msg.get_content_charset() or "utf-8", errors="replace")
+                    if ct == "text/html":
+                        body_html = text
+                    else:
+                        body_plain = text
+                except Exception:
+                    pass
+
+            final_html = body_html or (f"<pre>{body_plain}</pre>" if body_plain else None)
+
+            return {
+                "id": target_message_id,
+                "subject": subject,
+                "from": {
+                    "emailAddress": {
+                        "name": from_name[:255],
+                        "address": from_addr[:255],
+                    }
+                },
+                "toRecipients": [
+                    {"emailAddress": r} for r in to_list
+                ],
+                "receivedDateTime": received_at,
+                "isRead": True,
+                "body": {
+                    "contentType": "html",
+                    "content": final_html or "",
+                },
+                "hasAttachments": has_attachments,
+                "_method": "IMAP",
             }
         finally:
             try:

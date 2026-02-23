@@ -231,10 +231,18 @@ async def get_notifications():
 
 @app.post("/api/accounts/sync-all")
 async def sync_all_now():
-    """Manually trigger sync for the next account in the staggered queue."""
-    from scheduler import sync_one_account as _sync
-    await _sync()
-    return {"message": "同步完成"}
+    """Manually trigger sync for all auto_sync groups."""
+    from scheduler import _sync_accounts_for_group
+    from sqlalchemy import select as sa_select
+    from models import Group as GroupModel
+    async with async_session() as session:
+        result = await session.execute(
+            sa_select(GroupModel.id).where(GroupModel.auto_sync == True)
+        )
+        group_ids = [r[0] for r in result.all()]
+    for gid in group_ids:
+        await _sync_accounts_for_group(gid)
+    return {"message": f"同步完成 ({len(group_ids)} 个分组)"}
 
 
 @app.get("/api/sync-status")

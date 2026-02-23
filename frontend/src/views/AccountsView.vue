@@ -328,6 +328,14 @@
               <div v-if="emailsStore.loading" class="email-modal-loading">
                 <div class="spinner"></div>
               </div>
+              <div v-else-if="emailsStore.error" class="email-modal-empty">
+                <div style="font-size: 2.5rem; margin-bottom: 12px;">⚠️</div>
+                <div style="color:var(--danger);font-weight:500;margin-bottom:8px;">获取邮件失败</div>
+                <div style="font-size:0.82rem;color:var(--text-muted);max-width:400px;word-break:break-all;">
+                  {{ typeof emailsStore.error === 'object' ? (emailsStore.error.message || JSON.stringify(emailsStore.error.errors)) : emailsStore.error }}
+                </div>
+                <button class="btn btn-primary btn-sm" style="margin-top:14px;" @click="refreshEmails">🔄 重试</button>
+              </div>
               <div v-else-if="emailList.length === 0" class="email-modal-empty">
                 <div style="font-size: 2.5rem; margin-bottom: 12px;">📭</div>
                 <div>暂无邮件</div>
@@ -712,11 +720,52 @@
           </div>
           <div class="form-group">
             <label class="form-label">代理 URL</label>
-            <input class="form-input" v-model="editingGroup.proxy_url" placeholder="http://host:port 或 socks5://host:port" />
+            <div style="display:flex;gap:6px;">
+              <input class="form-input" v-model="editingGroup.proxy_url" placeholder="http://host:port 或 socks5://host:port" style="flex:1;" />
+              <button v-if="editingGroup.proxy_url" class="btn btn-secondary btn-sm" @click="editingGroup.proxy_url = ''" title="清除代理" style="white-space:nowrap;">✕ 清除</button>
+            </div>
+            <div v-if="editingGroup.id && editingGroup.proxy_url" style="margin-top:6px;">
+              <button class="btn btn-sm" :class="proxyTestResult?.ok ? 'btn-primary' : 'btn-secondary'" @click="testGroupProxy(editingGroup.id)" :disabled="proxyTesting" style="font-size:0.78rem;">
+                {{ proxyTesting ? '⏳ 测试中...' : '🔍 测试代理' }}
+              </button>
+              <span v-if="proxyTestResult" style="font-size:0.78rem;margin-left:8px;" :style="{color: proxyTestResult.ok ? 'var(--success)' : 'var(--danger)'}">
+                {{ proxyTestResult.message }}
+              </span>
+            </div>
           </div>
           <div class="form-group">
             <label class="form-label">描述</label>
             <input class="form-input" v-model="editingGroup.description" placeholder="分组描述 (可选)" />
+          </div>
+          <hr style="border-color:var(--border);margin:12px 0;" />
+          <div class="form-group">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <label style="font-size:0.85rem;"><input type="checkbox" v-model="editingGroup.auto_sync" /> 🔄 启用自动同步</label>
+            </div>
+          </div>
+          <div class="form-group" v-if="editingGroup.auto_sync">
+            <label class="form-label">⏱ 同步设置</label>
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
+              <span style="font-size:0.85rem;white-space:nowrap;">同步间隔</span>
+              <input class="form-input" type="number" v-model.number="editingGroup.sync_interval_minutes" min="1" style="width:80px;" />
+              <span style="font-size:0.85rem;">分钟</span>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <span style="font-size:0.85rem;white-space:nowrap;">每批同步</span>
+              <input class="form-input" type="number" v-model.number="editingGroup.sync_batch_size" min="1" style="width:80px;" />
+              <span style="font-size:0.85rem;">个账号</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">🔑 Token 刷新</label>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <label style="font-size:0.85rem;"><input type="checkbox" v-model="editingGroup.auto_refresh_token" /> 启用自动刷新 Token</label>
+            </div>
+            <div v-if="editingGroup.auto_refresh_token" style="display:flex;gap:10px;align-items:center;">
+              <span style="font-size:0.85rem;white-space:nowrap;">刷新间隔</span>
+              <input class="form-input" type="number" v-model.number="editingGroup.refresh_interval_hours" min="1" style="width:80px;" />
+              <span style="font-size:0.85rem;">小时</span>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -1114,16 +1163,44 @@ function editGroup(group) {
 async function saveEditGroup() {
   if (!editingGroup.value) return
   try {
-    await groupsStore.updateGroup(editingGroup.value.id, {
+    const payload = {
       name: editingGroup.value.name,
       color: editingGroup.value.color,
-      proxy_url: editingGroup.value.proxy_url || null,
       description: editingGroup.value.description || null,
-    })
+      auto_sync: editingGroup.value.auto_sync ?? false,
+      sync_interval_minutes: editingGroup.value.sync_interval_minutes || 2,
+      sync_batch_size: editingGroup.value.sync_batch_size || 1,
+      auto_refresh_token: editingGroup.value.auto_refresh_token ?? true,
+      refresh_interval_hours: editingGroup.value.refresh_interval_hours || 24,
+    }
+    // Explicitly send proxy_url: even if empty string or null, so backend can clear it
+    payload.proxy_url = editingGroup.value.proxy_url?.trim() || null
+    await groupsStore.updateGroup(editingGroup.value.id, payload)
     editingGroup.value = null
+    proxyTestResult.value = null
     notifStore.addToast('分组已更新', 'success')
   } catch (e) {
     notifStore.addToast(e.response?.data?.detail || '更新失败', 'error')
+  }
+}
+
+// Proxy testing
+const proxyTesting = ref(false)
+const proxyTestResult = ref(null)
+
+async function testGroupProxy(groupId) {
+  proxyTesting.value = true
+  proxyTestResult.value = null
+  try {
+    const { data } = await axios.post(`/api/groups/${groupId}/test-proxy`)
+    proxyTestResult.value = data
+  } catch (e) {
+    proxyTestResult.value = {
+      ok: false,
+      message: e.response?.data?.detail || '测试请求失败',
+    }
+  } finally {
+    proxyTesting.value = false
   }
 }
 

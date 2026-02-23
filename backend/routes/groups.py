@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import List
+import httpx
+import time
 
 from database import get_session
 from models import Group, Account
@@ -18,6 +20,10 @@ def _build_response(g, count):
         color=g.color,
         proxy_url=g.proxy_url,
         auto_sync=g.auto_sync,
+        sync_interval_minutes=g.sync_interval_minutes or 2,
+        sync_batch_size=g.sync_batch_size or 1,
+        auto_refresh_token=g.auto_refresh_token if g.auto_refresh_token is not None else True,
+        refresh_interval_hours=g.refresh_interval_hours or 24,
         account_count=count,
         created_at=g.created_at,
     )
@@ -59,6 +65,10 @@ async def create_group(
         color=payload.color,
         proxy_url=payload.proxy_url,
         auto_sync=payload.auto_sync,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        sync_batch_size=payload.sync_batch_size,
+        auto_refresh_token=payload.auto_refresh_token,
+        refresh_interval_hours=payload.refresh_interval_hours,
     )
     session.add(group)
     await session.commit()
@@ -90,10 +100,19 @@ async def update_group(
         group.description = payload.description
     if payload.color is not None:
         group.color = payload.color
-    if payload.proxy_url is not None:
-        group.proxy_url = payload.proxy_url
+    # Use model_fields_set to detect if proxy_url was explicitly sent (including null to clear)
+    if "proxy_url" in payload.model_fields_set:
+        group.proxy_url = payload.proxy_url if payload.proxy_url else None
     if payload.auto_sync is not None:
         group.auto_sync = payload.auto_sync
+    if payload.sync_interval_minutes is not None:
+        group.sync_interval_minutes = payload.sync_interval_minutes
+    if payload.sync_batch_size is not None:
+        group.sync_batch_size = payload.sync_batch_size
+    if payload.auto_refresh_token is not None:
+        group.auto_refresh_token = payload.auto_refresh_token
+    if payload.refresh_interval_hours is not None:
+        group.refresh_interval_hours = payload.refresh_interval_hours
 
     await session.commit()
     await session.refresh(group)
@@ -122,3 +141,39 @@ async def delete_group(
     await session.delete(group)
     await session.commit()
     return {"message": "分组已删除"}
+
+
+@router.post("/{group_id}/test-proxy")
+async def test_proxy(
+    group_id: int, session: AsyncSession = Depends(get_session)
+):
+    """Test if the group's proxy is reachable."""
+    result = await session.execute(
+        select(Group).where(Group.id == group_id)
+    )
+    group = result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(404, "分组不存在")
+    if not group.proxy_url:
+        raise HTTPException(400, "该分组未设置代理")
+
+    start = time.time()
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, proxy=group.proxy_url
+        ) as client:
+            resp = await client.get("https://graph.microsoft.com/v1.0/$metadata")
+            latency = round((time.time() - start) * 1000)
+            return {
+                "ok": True,
+                "status_code": resp.status_code,
+                "latency_ms": latency,
+                "message": f"代理连接成功 ({latency}ms)",
+            }
+    except Exception as e:
+        latency = round((time.time() - start) * 1000)
+        return {
+            "ok": False,
+            "latency_ms": latency,
+            "message": f"代理连接失败: {e}",
+        }

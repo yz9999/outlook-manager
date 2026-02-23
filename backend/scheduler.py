@@ -7,7 +7,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from config import STAGGER_INTERVAL_MINUTES, ROUND_COOLDOWN_HOURS
 from database import async_session
 from models import Account, Group, Email
 from outlook_client import outlook_client
@@ -19,15 +18,8 @@ logger = logging.getLogger("scheduler")
 # Store new-email events: {account_id: new_unread_count}
 new_email_events: Dict[int, int] = {}
 
-# Track which single account to sync next (round-robin)
-_next_account_offset: int = 0
-
-# Track current round number
-_current_round: int = 1
-
-# Whether we are in cooldown (paused between rounds)
-_in_cooldown: bool = False
-_cooldown_until: datetime = None
+# Track per-group round-robin state: {group_id: offset}
+_group_offsets: Dict[int, int] = {}
 
 # Sync log: store recent sync entries (max 200)
 MAX_LOG_ENTRIES = 200
@@ -46,61 +38,28 @@ def _add_log(level: str, email: str, message: str):
     })
 
 
-async def _save_emails(session, account: Account, access_token: str, proxy_url: str = None):
-    """Fetch latest emails from Graph API and save new ones to local DB."""
+async def _maybe_refresh_token(account: Account, proxy_url: str = None):
+    """Refresh token only if expired or expiring within 5 minutes.
+    Returns True if token was refreshed (or still valid), False on error.
+    """
+    now = datetime.utcnow()
+    # If token_expires_at is set and not expiring within 5 min, skip refresh
+    if account.token_expires_at and account.token_expires_at > now + timedelta(minutes=5):
+        return True
+
+    # Token expired or about to expire — refresh
     try:
-        data = await outlook_client.fetch_emails(access_token, top=30, proxy_url=proxy_url)
-        messages = data.get("value", [])
-        if not messages:
-            return 0
-
-        # Get existing message_ids for this account
-        existing_result = await session.execute(
-            select(Email.message_id).where(Email.account_id == account.id)
+        token_data = await outlook_client.refresh_access_token(
+            account.client_id, account.refresh_token, proxy_url=proxy_url
         )
-        existing_ids = set(r[0] for r in existing_result.all())
-
-        new_count = 0
-        for msg in messages:
-            msg_id = msg.get("id")
-            if not msg_id or msg_id in existing_ids:
-                continue
-
-            # Parse sender
-            sender_name = None
-            sender_address = None
-            fr = msg.get("from")
-            if fr and fr.get("emailAddress"):
-                ea = fr["emailAddress"]
-                sender_name = ea.get("name")
-                sender_address = ea.get("address")
-
-            # Parse received time
-            received_at = None
-            raw_time = msg.get("receivedDateTime")
-            if raw_time:
-                try:
-                    received_at = dtparser.isoparse(raw_time).replace(tzinfo=None)
-                except Exception:
-                    pass
-
-            email_record = Email(
-                account_id=account.id,
-                message_id=msg_id,
-                subject=(msg.get("subject") or "")[:500],
-                sender_name=(sender_name or "")[:255],
-                sender_address=(sender_address or "")[:255],
-                is_read=msg.get("isRead", False),
-                body_preview=(msg.get("bodyPreview") or "")[:500],
-                received_at=received_at,
-            )
-            session.add(email_record)
-            new_count += 1
-
-        return new_count
+        account.access_token = token_data["access_token"]
+        account.refresh_token = token_data["refresh_token"]
+        account.token_expires_at = now + timedelta(seconds=token_data["expires_in"])
+        logger.info(f"🔑 Token 已刷新: {account.email}")
+        return True
     except Exception as e:
-        logger.warning(f"保存邮件失败 {account.email}: {e}")
-        return 0
+        logger.warning(f"🔑 Token 刷新失败 {account.email}: {e}")
+        return False
 
 
 async def _save_emails_from_list(session, account: Account, messages: list):
@@ -157,43 +116,28 @@ async def _save_emails_from_list(session, account: Account, messages: list):
         return 0
 
 
-async def sync_one_account():
-    """Background job: sync ONE account from auto_sync-enabled groups (staggered).
-    After completing a full round, pause for ROUND_COOLDOWN_HOURS.
-    """
-    global _next_account_offset, _current_round, _in_cooldown, _cooldown_until
-
-    # Check if we are in cooldown
-    if _in_cooldown:
-        if datetime.utcnow() < _cooldown_until:
-            remaining = (_cooldown_until - datetime.utcnow()).total_seconds() / 60
-            logger.info(f"⏸ 冷却中，还需等待 {remaining:.0f} 分钟后开始第 {_current_round} 轮")
-            return
-        else:
-            # Cooldown finished
-            _in_cooldown = False
-            _cooldown_until = None
-            _add_log("info", "-", f"第 {_current_round} 轮同步开始")
-            logger.info(f"✅ 冷却结束，开始第 {_current_round} 轮同步")
+async def _sync_accounts_for_group(group_id: int):
+    """Background job: sync batch of accounts from a specific group (round-robin)."""
+    global _group_offsets
 
     async with async_session() as session:
-        # Get groups with auto_sync enabled
-        group_result = await session.execute(
-            select(Group.id).where(Group.auto_sync == True)
+        # Load group config
+        grp_result = await session.execute(
+            select(Group).where(Group.id == group_id)
         )
-        auto_sync_group_ids = [r[0] for r in group_result.all()]
-
-        if not auto_sync_group_ids:
-            logger.info("没有启用自动同步的分组，跳过")
-            _add_log("info", "-", "没有启用自动同步的分组，跳过")
+        grp = grp_result.scalar_one_or_none()
+        if not grp or not grp.auto_sync:
             return
 
-        # Only sync accounts belonging to auto_sync groups
+        batch_size = grp.sync_batch_size or 1
+        proxy_url = grp.proxy_url or None
+
+        # Get accounts in this group
         result = await session.execute(
             select(Account)
             .where(
                 Account.status != "disabled",
-                Account.group_id.in_(auto_sync_group_ids),
+                Account.group_id == group_id,
             )
             .order_by(Account.id)
         )
@@ -201,102 +145,185 @@ async def sync_one_account():
         total = len(all_accounts)
 
         if total == 0:
-            logger.info("自动同步的分组中没有账号")
-            _add_log("info", "-", "自动同步的分组中没有账号")
             return
 
-        # Pick ONE account (round-robin)
-        idx = _next_account_offset % total
-        account = all_accounts[idx]
+        # Pick batch_size accounts (round-robin)
+        offset = _group_offsets.get(group_id, 0) % total
+        batch_indices = []
+        for i in range(batch_size):
+            idx = (offset + i) % total
+            batch_indices.append(idx)
+            if idx == total - 1 and i < batch_size - 1:
+                # Wrap around but still continue batch
+                pass
 
-        logger.info(
-            f"⏱ 第{_current_round}轮 错峰同步: 第 {idx + 1}/{total} 个账号 — {account.email}"
-        )
+        # De-duplicate indices (in case batch_size > total)
+        seen = set()
+        unique_indices = []
+        for idx in batch_indices:
+            if idx not in seen:
+                seen.add(idx)
+                unique_indices.append(idx)
 
-        # Get proxy_url from group
-        proxy_url = None
-        if account.group_id:
-            grp_result = await session.execute(
-                select(Group).where(Group.id == account.group_id)
-            )
-            grp = grp_result.scalar_one_or_none()
-            if grp and grp.proxy_url:
-                proxy_url = grp.proxy_url
-
-        try:
-            token_data = await outlook_client.refresh_access_token(
-                account.client_id, account.refresh_token, proxy_url=proxy_url
-            )
-            account.access_token = token_data["access_token"]
-            account.refresh_token = token_data["refresh_token"]
-            account.token_expires_at = datetime.utcnow() + timedelta(
-                seconds=token_data["expires_in"]
+        for idx in unique_indices:
+            account = all_accounts[idx]
+            logger.info(
+                f"⏱ 分组[{grp.name}] 同步: 第 {idx + 1}/{total} 个账号 — {account.email}"
             )
 
-            unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
-            old_unread = account.unread_count or 0
+            try:
+                # Only refresh token if expired/expiring
+                token_ok = await _maybe_refresh_token(account, proxy_url)
+                if not token_ok:
+                    _add_log("error", account.email, "Token 过期且刷新失败，跳过同步")
+                    account.status = "error"
+                    account.last_error = "Token 过期且刷新失败"
+                    await session.commit()
+                    continue
 
-            if unread > old_unread:
-                new_email_events[account.id] = unread - old_unread
-                _add_log("info", account.email, f"{unread - old_unread} 封新邮件")
-                logger.info(
-                    f"📬 {account.email}: {unread - old_unread} 封新邮件"
-                )
+                used_method = None
+                saved = 0
+                sync_errors = []
 
-            account.unread_count = unread
-            account.status = "active"
-            account.last_synced = datetime.utcnow()
-            account.last_error = None
+                # Fallback chain: Graph → IMAP New → IMAP Old
+                methods_order = ["graph", "imap_new", "imap_old"]
+                if account.sync_method and account.sync_method in methods_order:
+                    methods_order.remove(account.sync_method)
+                    methods_order.insert(0, account.sync_method)
 
-            # Save emails to local DB
-            saved = await _save_emails(session, account, account.access_token, proxy_url=proxy_url)
-            if saved > 0:
-                _add_log("info", account.email, f"保存了 {saved} 封新邮件到本地")
-                logger.info(f"💾 {account.email}: 保存了 {saved} 封新邮件到本地")
+                for method in methods_order:
+                    try:
+                        if method == "graph":
+                            data = await outlook_client.fetch_emails(
+                                account.access_token, top=30, proxy_url=proxy_url
+                            )
+                            unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
+                            old_unread = account.unread_count or 0
+                            if unread > old_unread:
+                                new_email_events[account.id] = unread - old_unread
+                                _add_log("info", account.email, f"{unread - old_unread} 封新邮件")
+                                logger.info(f"📬 {account.email}: {unread - old_unread} 封新邮件")
+                            account.unread_count = unread
+                            account.graph_enabled = True
+                            saved = await _save_emails_from_list(session, account, data.get("value", []))
+                            used_method = "graph"
 
-            _add_log("success", account.email, f"同步成功 ({idx + 1}/{total})，未读: {unread}")
+                        elif method in ("imap_new", "imap_old"):
+                            data = await outlook_client.fetch_emails_imap(
+                                account.email, account.password,
+                                account.client_id, account.refresh_token,
+                                top=30, method=method,
+                            )
+                            imap_unread = data.get("_unread_count", 0)
+                            old_unread = account.unread_count or 0
+                            if imap_unread > old_unread:
+                                new_email_events[account.id] = imap_unread - old_unread
+                                _add_log("info", account.email, f"{imap_unread - old_unread} 封新邮件")
+                                logger.info(f"📬 {account.email}: {imap_unread - old_unread} 封新邮件 (IMAP)")
+                            account.unread_count = imap_unread
+                            account.imap_enabled = True
+                            saved = await _save_emails_from_list(session, account, data.get("value", []))
+                            used_method = method
 
-        except Exception as e:
-            err_msg = str(e)[:200]
-            logger.error(f"同步 {account.email} 失败: {e}")
-            account.status = "error"
-            account.last_error = str(e)[:500]
-            _add_log("error", account.email, f"同步失败: {err_msg}")
+                        # Success — mark and break
+                        account.sync_method = used_method
+                        break
+                    except Exception as e:
+                        sync_errors.append(f"{method}: {str(e)[:100]}")
+                        logger.info(f"{method} 失败 {account.email}: {e}")
+
+                if not used_method:
+                    account.sync_method = None
+                    account.graph_enabled = None  # 重置，下次重新尝试 Graph
+                    raise Exception("所有协议均失败: " + "; ".join(sync_errors))
+
+                account.status = "active"
+                account.last_synced = datetime.utcnow()
+                account.last_error = None
+
+                if saved > 0:
+                    _add_log("info", account.email, f"保存了 {saved} 封新邮件到本地")
+                    logger.info(f"💾 {account.email}: 保存了 {saved} 封新邮件到本地")
+
+                method_labels = {"graph": "Graph", "imap_new": "IMAP(新)", "imap_old": "IMAP(旧)"}
+                _add_log("success", account.email,
+                         f"同步成功 via {method_labels.get(used_method, used_method)} ({idx + 1}/{total})，未读: {account.unread_count}")
+
+            except Exception as e:
+                err_msg = str(e)[:200]
+                logger.error(f"同步 {account.email} 失败: {e}")
+                account.status = "error"
+                account.last_error = str(e)[:500]
+                _add_log("error", account.email, f"同步失败: {err_msg}")
 
         await session.commit()
 
         # Advance offset
-        next_idx = (idx + 1) % total
-        _next_account_offset = next_idx
+        next_offset = (offset + len(unique_indices)) % total
+        _group_offsets[group_id] = next_offset
 
-        # Check if we just finished a full round
-        if next_idx == 0:
-            _current_round += 1
-            _in_cooldown = True
-            _cooldown_until = datetime.utcnow() + timedelta(hours=ROUND_COOLDOWN_HOURS)
-            _add_log("info", "-",
-                     f"本轮同步完成（共 {total} 个账号），冷却 {ROUND_COOLDOWN_HOURS} 小时后开始第 {_current_round} 轮")
-            logger.info(
-                f"🏁 本轮同步完成（共 {total} 个账号），"
-                f"冷却 {ROUND_COOLDOWN_HOURS} 小时后开始第 {_current_round} 轮"
+    logger.info(f"分组[{group_id}] 本次同步完成")
+
+
+async def _refresh_group_tokens(group_id: int):
+    """Scheduled job: refresh tokens for all accounts in a specific group."""
+    async with async_session() as session:
+        grp_result = await session.execute(
+            select(Group).where(Group.id == group_id)
+        )
+        grp = grp_result.scalar_one_or_none()
+        if not grp:
+            return
+
+        proxy_url = grp.proxy_url or None
+
+        result = await session.execute(
+            select(Account).where(
+                Account.group_id == group_id,
+                Account.refresh_token.isnot(None),
             )
+        )
+        accounts = list(result.scalars().all())
 
-    logger.info("本次同步完成")
+        if not accounts:
+            return
+
+        logger.info(f"⏰ 分组[{grp.name}] 定时刷新 Token 开始 ({len(accounts)} 个账号)")
+        _add_log("info", "-", f"分组[{grp.name}] 定时刷新 Token 开始")
+
+        from routes.refresh import _do_refresh_one
+        success_count = 0
+        fail_count = 0
+
+        for account in accounts:
+            ok, err = await _do_refresh_one(account, session, refresh_type="auto")
+            if ok:
+                success_count += 1
+            else:
+                fail_count += 1
+
+        _add_log("info", "-",
+                 f"分组[{grp.name}] Token 刷新完成: 成功 {success_count}, 失败 {fail_count}")
+        logger.info(f"⏰ 分组[{grp.name}] Token 刷新完成: 成功 {success_count}, 失败 {fail_count}")
 
 
 def get_sync_status():
     """Return current sync scheduler status for the API."""
-    job = scheduler.get_job("sync_staggered")
-    running = job is not None
+    jobs = scheduler.get_jobs()
+    sync_jobs = [j for j in jobs if j.id.startswith("sync_group_")]
+    refresh_jobs = [j for j in jobs if j.id.startswith("refresh_group_")]
     return {
-        "running": running,
-        "interval_minutes": STAGGER_INTERVAL_MINUTES,
-        "cooldown_hours": ROUND_COOLDOWN_HOURS,
-        "current_round": _current_round,
-        "in_cooldown": _in_cooldown,
-        "cooldown_until": _cooldown_until.isoformat() + "Z" if _cooldown_until else None,
-        "next_offset": _next_account_offset,
-        "next_run": str(job.next_run_time) if job else None,
+        "running": len(sync_jobs) > 0,
+        "sync_groups": len(sync_jobs),
+        "refresh_groups": len(refresh_jobs),
+        "group_offsets": dict(_group_offsets),
+        "jobs": [
+            {
+                "id": j.id,
+                "next_run": str(j.next_run_time) if j.next_run_time else None,
+            }
+            for j in jobs
+        ],
     }
 
 
@@ -396,24 +423,59 @@ async def init_refresh_schedule():
         logger.warning(f"加载定时刷新配置失败: {e}")
 
 
-def start_scheduler():
-    scheduler.add_job(
-        sync_one_account,
-        "interval",
-        minutes=STAGGER_INTERVAL_MINUTES,
-        id="sync_staggered",
-        replace_existing=True,
-    )
-    scheduler.start()
-    _add_log("info", "-", f"调度器启动: 每 {STAGGER_INTERVAL_MINUTES} 分钟同步 1 个账号，每轮冷却 {ROUND_COOLDOWN_HOURS} 小时")
-    logger.info(
-        f"调度器已启动，每 {STAGGER_INTERVAL_MINUTES} 分钟同步 1 个账号，"
-        f"每轮完成后冷却 {ROUND_COOLDOWN_HOURS} 小时"
-    )
+async def _setup_group_jobs():
+    """Set up per-group sync and refresh jobs based on group settings."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Group).where(Group.auto_sync == True)
+        )
+        groups = list(result.scalars().all())
 
-    # Load timed refresh schedule (must be done after scheduler starts)
+        for grp in groups:
+            # Add sync job for this group
+            interval_min = grp.sync_interval_minutes or 2
+            job_id = f"sync_group_{grp.id}"
+            scheduler.add_job(
+                _sync_accounts_for_group,
+                "interval",
+                minutes=interval_min,
+                args=[grp.id],
+                id=job_id,
+                replace_existing=True,
+            )
+            logger.info(
+                f"📅 分组[{grp.name}] 同步已配置: 每 {interval_min} 分钟, "
+                f"每批 {grp.sync_batch_size or 1} 个账号"
+            )
+            _add_log("info", "-",
+                     f"分组[{grp.name}] 同步: 每 {interval_min} 分钟, 每批 {grp.sync_batch_size or 1} 个")
+
+            # Add token refresh job if enabled
+            if grp.auto_refresh_token:
+                refresh_hours = grp.refresh_interval_hours or 24
+                refresh_job_id = f"refresh_group_{grp.id}"
+                scheduler.add_job(
+                    _refresh_group_tokens,
+                    "interval",
+                    hours=refresh_hours,
+                    args=[grp.id],
+                    id=refresh_job_id,
+                    replace_existing=True,
+                )
+                logger.info(f"📅 分组[{grp.name}] Token 刷新: 每 {refresh_hours} 小时")
+                _add_log("info", "-", f"分组[{grp.name}] Token 刷新: 每 {refresh_hours} 小时")
+
+
+def start_scheduler():
+    scheduler.start()
+    _add_log("info", "-", "调度器启动")
+    logger.info("调度器已启动")
+
+    # Set up per-group jobs and timed refresh
     import asyncio
-    asyncio.get_event_loop().create_task(init_refresh_schedule())
+    loop = asyncio.get_event_loop()
+    loop.create_task(_setup_group_jobs())
+    loop.create_task(init_refresh_schedule())
 
 
 def stop_scheduler():

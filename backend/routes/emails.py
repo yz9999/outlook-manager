@@ -72,8 +72,8 @@ async def list_emails(
     proxy_url = await _get_proxy_url(account, session)
     errors = []
 
-    # ── Try Graph API first ──
-    if account.refresh_token and account.client_id:
+    # ── Try Graph API first (skip if previously marked as disabled) ──
+    if account.refresh_token and account.client_id and account.graph_enabled is not False:
         try:
             await _ensure_token(account, session, proxy_url=proxy_url)
             data = await outlook_client.fetch_emails(
@@ -99,14 +99,17 @@ async def list_emails(
             raise HTTPException(502, f"代理连接错误: {e}")
         except Exception as e:
             errors.append(f"Graph API: {e}")
+            # Mark graph as disabled so next request skips it
+            account.graph_enabled = False
+            await session.commit()
 
-    # ── Try IMAP (only for inbox folder) ──
-    if account.client_id and account.refresh_token and folder == "inbox":
+    # ── Try IMAP ──
+    if account.client_id and account.refresh_token:
         try:
             data = await outlook_client.fetch_emails_imap(
                 account.email, account.password,
                 account.client_id, account.refresh_token,
-                top=top
+                top=top, folder=folder
             )
             emails = []
             for msg in data.get("value", []):
@@ -187,8 +190,8 @@ async def get_email_detail(
 
     proxy_url = await _get_proxy_url(account, session)
 
-    # ── Try Graph API first ──
-    if account.refresh_token and account.client_id:
+    # ── Try Graph API first (skip if previously marked as disabled) ──
+    if account.refresh_token and account.client_id and account.graph_enabled is not False:
         try:
             await _ensure_token(account, session, proxy_url=proxy_url)
             msg = await outlook_client.fetch_email_detail(
@@ -214,6 +217,34 @@ async def get_email_detail(
             )
         except ProxyError as e:
             raise HTTPException(502, f"代理连接错误: {e}")
+        except Exception:
+            pass  # Fall through to IMAP / local DB
+
+    # ── Try IMAP fallback ──
+    if account.client_id and account.refresh_token:
+        try:
+            msg = await outlook_client.fetch_email_detail_imap(
+                account.email, account.password,
+                account.client_id, account.refresh_token,
+                message_id=message_id,
+            )
+            if msg:
+                to_list = []
+                for r in msg.get("toRecipients", []):
+                    ea = r.get("emailAddress", {})
+                    to_list.append(EmailAddress(name=ea.get("name"), address=ea.get("address", "")))
+
+                body = msg.get("body", {})
+                return EmailDetail(
+                    id=msg["id"],
+                    subject=msg.get("subject"),
+                    sender=_parse_sender(msg),
+                    to_recipients=to_list,
+                    received_at=msg.get("receivedDateTime"),
+                    is_read=msg.get("isRead", False),
+                    body_html=body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>",
+                    has_attachments=msg.get("hasAttachments", False),
+                )
         except Exception:
             pass  # Fall through to local DB
 

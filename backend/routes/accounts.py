@@ -205,57 +205,71 @@ async def sync_account(
         used_protocol = None
         sync_error_details = []
 
-        # ── Try Graph API ──
-        try:
-            token_data = await outlook_client.refresh_access_token(
-                account.client_id, account.refresh_token, proxy_url=proxy_url
-            )
-            account.access_token = token_data["access_token"]
-            account.refresh_token = token_data["refresh_token"]
-            account.token_expires_at = datetime.utcnow() + timedelta(
-                seconds=token_data["expires_in"]
-            )
+        # ── Refresh token only when expired/expiring ──
+        from scheduler import _maybe_refresh_token
+        token_ok = await _maybe_refresh_token(account, proxy_url)
+        if not token_ok:
+            sync_error_details.append("Token 过期且刷新失败")
 
-            unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
-            account.unread_count = unread
-            account.graph_enabled = True
+        # ── Sync with fallback: Graph → IMAP New → IMAP Old ──
+        # If account has a preferred method, try it first
+        methods_order = ["graph", "imap_new", "imap_old"]
+        if account.sync_method and account.sync_method in methods_order:
+            # Move preferred method to front
+            methods_order.remove(account.sync_method)
+            methods_order.insert(0, account.sync_method)
 
-            from scheduler import _save_emails
-            saved = await _save_emails(session, account, account.access_token, proxy_url=proxy_url)
-            used_protocol = "graph"
-        except Exception as e:
-            sync_error_details.append(f"Graph: {str(e)[:150]}")
-            account.graph_enabled = False
-
-        # ── Try IMAP (if Graph failed) ──
-        if not used_protocol:
+        for method in methods_order:
             try:
-                data = await outlook_client.fetch_emails_imap(
-                    account.email, account.password,
-                    account.client_id, account.refresh_token,
-                    top=30
-                )
-                account.unread_count = data.get("_unread_count", 0)
-                account.imap_enabled = True
-                # Save IMAP emails to local DB
-                from scheduler import _save_emails_from_list
-                saved = await _save_emails_from_list(session, account, data.get("value", []))
-                used_protocol = "imap"
+                if method == "graph":
+                    data = await outlook_client.fetch_emails(
+                        account.access_token, top=30, proxy_url=proxy_url
+                    )
+                    unread = await outlook_client.get_unread_count(account.access_token, proxy_url=proxy_url)
+                    account.unread_count = unread
+                    account.graph_enabled = True
+                    from scheduler import _save_emails_from_list
+                    saved = await _save_emails_from_list(session, account, data.get("value", []))
+                    used_protocol = "graph"
+
+                elif method == "imap_new":
+                    data = await outlook_client.fetch_emails_imap(
+                        account.email, account.password,
+                        account.client_id, account.refresh_token,
+                        top=30, method="imap_new"
+                    )
+                    account.unread_count = data.get("_unread_count", 0)
+                    account.imap_enabled = True
+                    from scheduler import _save_emails_from_list
+                    saved = await _save_emails_from_list(session, account, data.get("value", []))
+                    used_protocol = "imap_new"
+
+                elif method == "imap_old":
+                    data = await outlook_client.fetch_emails_imap(
+                        account.email, account.password,
+                        account.client_id, account.refresh_token,
+                        top=30, method="imap_old"
+                    )
+                    account.unread_count = data.get("_unread_count", 0)
+                    account.imap_enabled = True
+                    from scheduler import _save_emails_from_list
+                    saved = await _save_emails_from_list(session, account, data.get("value", []))
+                    used_protocol = "imap_old"
+
+                # Success — mark method and break
+                account.sync_method = used_protocol
+                break
+
             except Exception as e:
-                sync_error_details.append(f"IMAP: {str(e)[:150]}")
-                account.imap_enabled = False
+                sync_error_details.append(f"{method}: {str(e)[:150]}")
 
         if not used_protocol:
+            account.sync_method = None
+            account.graph_enabled = None  # 重置，下次重新尝试 Graph
             raise Exception("所有协议均失败: " + "; ".join(sync_error_details))
 
-        # Detect remaining protocols (best-effort, skip the one already confirmed)
+        # Detect remaining protocols (best-effort)
         try:
-            if account.imap_enabled is None:
-                account.imap_enabled = await outlook_client.check_imap(
-                    account.email, account.password, account.client_id, account.refresh_token)
-            if account.pop3_enabled is None:
-                account.pop3_enabled = await outlook_client.check_pop3(
-                    account.email, account.password, account.client_id, account.refresh_token)
             if account.graph_enabled is None and account.access_token:
                 account.graph_enabled = await outlook_client.check_graph(account.access_token, proxy_url=proxy_url)
         except Exception:
@@ -266,11 +280,13 @@ async def sync_account(
         account.last_error = None
         await session.commit()
 
+        method_labels = {"graph": "Graph API", "imap_new": "IMAP (新版)", "imap_old": "IMAP (旧版)"}
         return {
-            "message": f"同步成功 (via {used_protocol.upper()})",
+            "message": f"同步成功 (via {method_labels.get(used_protocol, used_protocol)})",
             "unread_count": account.unread_count,
             "emails_saved": saved,
             "protocol": used_protocol,
+            "sync_method": account.sync_method,
             "imap_enabled": account.imap_enabled,
             "pop3_enabled": account.pop3_enabled,
             "graph_enabled": account.graph_enabled,

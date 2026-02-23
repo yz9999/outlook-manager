@@ -34,6 +34,7 @@ def _add_missing_columns(conn):
             "remark": "VARCHAR(500)",
             "last_refresh_at": "DATETIME",
             "refresh_status": "VARCHAR(50) DEFAULT 'unknown'",
+            "sync_method": "VARCHAR(50)",
         }
         for col, dtype in new_cols.items():
             if col not in existing:
@@ -45,6 +46,10 @@ def _add_missing_columns(conn):
         new_cols = {
             "color": "VARCHAR(50)",
             "proxy_url": "VARCHAR(500)",
+            "sync_interval_minutes": "INTEGER DEFAULT 2",
+            "sync_batch_size": "INTEGER DEFAULT 1",
+            "auto_refresh_token": "BOOLEAN DEFAULT 1",
+            "refresh_interval_hours": "INTEGER DEFAULT 24",
         }
         for col, dtype in new_cols.items():
             if col not in existing:

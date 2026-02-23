@@ -21,6 +21,10 @@ class Group(Base):
     color = Column(String(50), nullable=True)
     proxy_url = Column(String(500), nullable=True)
     auto_sync = Column(Boolean, default=False, nullable=False)
+    sync_interval_minutes = Column(Integer, default=2, nullable=False)
+    sync_batch_size = Column(Integer, default=1, nullable=False)
+    auto_refresh_token = Column(Boolean, default=True, nullable=False)
+    refresh_interval_hours = Column(Integer, default=24, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     accounts = relationship("Account", back_populates="group", lazy="selectin")
@@ -46,6 +50,7 @@ class Account(Base):
     remark = Column(String(500), nullable=True)
     last_refresh_at = Column(DateTime, nullable=True)
     refresh_status = Column(String(50), default="unknown")  # unknown / success / failed
+    sync_method = Column(String(50), nullable=True)  # graph / imap_new / imap_old
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

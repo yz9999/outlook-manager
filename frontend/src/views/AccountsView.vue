@@ -1361,10 +1361,10 @@ function openSearchEmail(email) {
     notifStore.addToast(`找不到账号 ${email.account_email}`, 'error')
     return
   }
-  // Open the email detail modal directly
+  // Open the email detail modal directly from local DB (no network calls)
   emailViewAccount.value = account
   viewingDetail.value = true
-  emailsStore.fetchEmailDetail(account.id, email.message_id)
+  emailsStore.fetchLocalEmailDetail(email.id)
 
   // Mark as read in local DB + update search result in-place
   if (!email.is_read) {

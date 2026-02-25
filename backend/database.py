@@ -40,6 +40,12 @@ def _add_missing_columns(conn):
             if col not in existing:
                 conn.execute(text(f"ALTER TABLE accounts ADD COLUMN {col} {dtype}"))
 
+    # ── emails table ──
+    if inspector.has_table("emails"):
+        existing = {c["name"] for c in inspector.get_columns("emails")}
+        if "body_html" not in existing:
+            conn.execute(text("ALTER TABLE emails ADD COLUMN body_html TEXT"))
+
     # ── groups table ──
     if inspector.has_table("groups"):
         existing = {c["name"] for c in inspector.get_columns("groups")}

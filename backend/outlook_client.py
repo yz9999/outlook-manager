@@ -196,7 +196,7 @@ class OutlookClient:
         url = (
             f"{MS_GRAPH_BASE}/me/mailFolders/{folder}/messages"
             f"?$top={top}&$skip={skip}"
-            f"&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
+            f"&$select=id,subject,from,receivedDateTime,isRead,bodyPreview,body"
             f"&$orderby=receivedDateTime desc"
             f"&$count=true"
         )
@@ -380,24 +380,46 @@ class OutlookClient:
                         except Exception:
                             pass
 
-                    # Get body preview
+                    # Get body preview and full HTML body
                     body_preview = ""
+                    body_html = None
+                    body_plain = None
                     if msg.is_multipart():
                         for part in msg.walk():
                             ct = part.get_content_type()
-                            if ct == "text/plain":
+                            disp = str(part.get("Content-Disposition", ""))
+                            if "attachment" in disp:
+                                continue
+                            if ct == "text/html" and body_html is None:
                                 try:
-                                    body_preview = part.get_payload(decode=True).decode(
-                                        part.get_content_charset() or "utf-8", errors="replace")[:200]
+                                    body_html = part.get_payload(decode=True).decode(
+                                        part.get_content_charset() or "utf-8", errors="replace")
                                 except Exception:
                                     pass
-                                break
+                            elif ct == "text/plain" and body_plain is None:
+                                try:
+                                    body_plain = part.get_payload(decode=True).decode(
+                                        part.get_content_charset() or "utf-8", errors="replace")
+                                except Exception:
+                                    pass
                     else:
+                        ct = msg.get_content_type()
                         try:
-                            body_preview = msg.get_payload(decode=True).decode(
-                                msg.get_content_charset() or "utf-8", errors="replace")[:200]
+                            text_content = msg.get_payload(decode=True).decode(
+                                msg.get_content_charset() or "utf-8", errors="replace")
+                            if ct == "text/html":
+                                body_html = text_content
+                            else:
+                                body_plain = text_content
                         except Exception:
                             pass
+
+                    if body_plain:
+                        body_preview = body_plain[:200]
+                    elif body_html:
+                        body_preview = body_html[:200]
+
+                    final_html = body_html or (f"<pre>{body_plain}</pre>" if body_plain else None)
 
                     result_emails.append({
                         "id": msg_id_str,
@@ -409,8 +431,12 @@ class OutlookClient:
                             }
                         },
                         "receivedDateTime": received_at,
-                        "isRead": True,  # IMAP PEEK doesn't include FLAGS
+                        "isRead": False,  # Default to unread, matching Graph API behavior
                         "bodyPreview": body_preview[:500],
+                        "body": {
+                            "contentType": "html",
+                            "content": final_html or "",
+                        },
                     })
                 except Exception as e:
                     logger.debug(f"IMAP parse msg {msg_id}: {e}")
@@ -562,7 +588,7 @@ class OutlookClient:
                     {"emailAddress": r} for r in to_list
                 ],
                 "receivedDateTime": received_at,
-                "isRead": True,
+                "isRead": False,  # Default to unread, matching Graph API behavior
                 "body": {
                     "contentType": "html",
                     "content": final_html or "",

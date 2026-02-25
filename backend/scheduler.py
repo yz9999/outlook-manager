@@ -97,6 +97,13 @@ async def _save_emails_from_list(session, account: Account, messages: list):
                 except Exception:
                     pass
 
+            # Extract full HTML body
+            body_html = None
+            body_data = msg.get("body")
+            if body_data and isinstance(body_data, dict):
+                body_html = body_data.get("content")
+            # If no body dict, maybe a direct string (should not happen but safe guard)
+
             email_record = Email(
                 account_id=account.id,
                 message_id=msg_id,
@@ -105,6 +112,7 @@ async def _save_emails_from_list(session, account: Account, messages: list):
                 sender_address=(sender_address or "")[:255],
                 is_read=msg.get("isRead", False),
                 body_preview=(msg.get("bodyPreview") or "")[:500],
+                body_html=body_html,
                 received_at=received_at,
             )
             session.add(email_record)
@@ -464,6 +472,65 @@ async def _setup_group_jobs():
                 )
                 logger.info(f"📅 分组[{grp.name}] Token 刷新: 每 {refresh_hours} 小时")
                 _add_log("info", "-", f"分组[{grp.name}] Token 刷新: 每 {refresh_hours} 小时")
+
+
+async def reload_group_job(group_id: int):
+    """Reload scheduler jobs for a specific group after settings change."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Group).where(Group.id == group_id)
+        )
+        grp = result.scalar_one_or_none()
+
+    sync_job_id = f"sync_group_{group_id}"
+    refresh_job_id = f"refresh_group_{group_id}"
+
+    # Remove existing jobs for this group
+    if scheduler.get_job(sync_job_id):
+        scheduler.remove_job(sync_job_id)
+        logger.info(f"📅 已移除分组[{group_id}] 同步任务")
+    if scheduler.get_job(refresh_job_id):
+        scheduler.remove_job(refresh_job_id)
+        logger.info(f"📅 已移除分组[{group_id}] Token 刷新任务")
+
+    if not grp:
+        # Group was deleted
+        _add_log("info", "-", f"分组[{group_id}] 调度任务已移除（分组已删除）")
+        return
+
+    # Re-add sync job if auto_sync is on
+    if grp.auto_sync:
+        interval_min = grp.sync_interval_minutes or 2
+        scheduler.add_job(
+            _sync_accounts_for_group,
+            "interval",
+            minutes=interval_min,
+            args=[grp.id],
+            id=sync_job_id,
+            replace_existing=True,
+        )
+        logger.info(
+            f"📅 分组[{grp.name}] 同步任务已更新: 每 {interval_min} 分钟, "
+            f"每批 {grp.sync_batch_size or 1} 个账号"
+        )
+        _add_log("info", "-",
+                 f"分组[{grp.name}] 同步已更新: 每 {interval_min} 分钟, 每批 {grp.sync_batch_size or 1} 个")
+    else:
+        _add_log("info", "-", f"分组[{grp.name}] 自动同步已关闭")
+
+    # Re-add token refresh job if enabled
+    if grp.auto_refresh_token:
+        refresh_hours = grp.refresh_interval_hours or 24
+        scheduler.add_job(
+            _refresh_group_tokens,
+            "interval",
+            hours=refresh_hours,
+            args=[grp.id],
+            id=refresh_job_id,
+            replace_existing=True,
+        )
+        logger.info(f"📅 分组[{grp.name}] Token 刷新任务已更新: 每 {refresh_hours} 小时")
+        _add_log("info", "-", f"分组[{grp.name}] Token 刷新已更新: 每 {refresh_hours} 小时")
 
 
 def start_scheduler():

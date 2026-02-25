@@ -269,7 +269,7 @@ async def get_email_detail(
         to_recipients=[],
         received_at=email_record.received_at.isoformat() if email_record.received_at else None,
         is_read=email_record.is_read,
-        body_html=f"<pre>{email_record.body_preview or '邮件内容需要通过 IMAP 获取完整正文'}</pre>",
+        body_html=email_record.body_html or f"<pre>{email_record.body_preview or '邮件内容需要通过 IMAP 获取完整正文'}</pre>",
         has_attachments=False,
     )
 
@@ -419,3 +419,126 @@ async def mark_email_read(email_id: int, session: AsyncSession = Depends(get_ses
     email.is_read = True
     await session.commit()
     return {"message": "ok"}
+
+
+@router.get("/emails/{email_db_id}/local-detail", response_model=EmailDetail)
+async def get_local_email_detail(
+    email_db_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Get email detail: prefer local DB, fall back to network if body_html missing."""
+    result = await session.execute(
+        select(Email).where(Email.id == email_db_id)
+    )
+    email_record = result.scalar_one_or_none()
+    if not email_record:
+        raise HTTPException(404, "邮件不存在")
+
+    # If body_html exists locally, return directly
+    if email_record.body_html:
+        return EmailDetail(
+            id=email_record.message_id,
+            subject=email_record.subject,
+            sender=EmailAddress(
+                name=email_record.sender_name or "",
+                address=email_record.sender_address or ""
+            ),
+            to_recipients=[],
+            received_at=email_record.received_at.isoformat() if email_record.received_at else None,
+            is_read=email_record.is_read,
+            body_html=email_record.body_html,
+            has_attachments=False,
+        )
+
+    # body_html is empty — try fetching from network and save locally
+    acct_result = await session.execute(
+        select(Account).where(Account.id == email_record.account_id)
+    )
+    account = acct_result.scalar_one_or_none()
+
+    if account:
+        proxy_url = await _get_proxy_url(account, session)
+        fetched_body = None
+
+        # Try Graph API
+        if account.refresh_token and account.client_id and account.graph_enabled is not False:
+            try:
+                await _ensure_token(account, session, proxy_url=proxy_url)
+                msg = await outlook_client.fetch_email_detail(
+                    account.access_token, email_record.message_id, proxy_url=proxy_url
+                )
+                body = msg.get("body", {})
+                fetched_body = body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>"
+
+                to_list = []
+                for r in msg.get("toRecipients", []):
+                    ea = r.get("emailAddress", {})
+                    to_list.append(EmailAddress(name=ea.get("name"), address=ea.get("address", "")))
+
+                # Save to local DB for future
+                if fetched_body:
+                    email_record.body_html = fetched_body
+                    await session.commit()
+
+                return EmailDetail(
+                    id=msg["id"],
+                    subject=msg.get("subject"),
+                    sender=_parse_sender(msg),
+                    to_recipients=to_list,
+                    received_at=msg.get("receivedDateTime"),
+                    is_read=msg.get("isRead", False),
+                    body_html=fetched_body or "",
+                    has_attachments=msg.get("hasAttachments", False),
+                )
+            except Exception:
+                pass
+
+        # Try IMAP
+        if account.client_id and account.refresh_token:
+            try:
+                msg = await outlook_client.fetch_email_detail_imap(
+                    account.email, account.password,
+                    account.client_id, account.refresh_token,
+                    message_id=email_record.message_id,
+                )
+                if msg:
+                    body = msg.get("body", {})
+                    fetched_body = body.get("content") if body.get("contentType") == "html" else f"<pre>{body.get('content', '')}</pre>"
+
+                    to_list = []
+                    for r in msg.get("toRecipients", []):
+                        ea = r.get("emailAddress", {})
+                        to_list.append(EmailAddress(name=ea.get("name"), address=ea.get("address", "")))
+
+                    # Save to local DB for future
+                    if fetched_body:
+                        email_record.body_html = fetched_body
+                        await session.commit()
+
+                    return EmailDetail(
+                        id=msg["id"],
+                        subject=msg.get("subject"),
+                        sender=_parse_sender(msg),
+                        to_recipients=to_list,
+                        received_at=msg.get("receivedDateTime"),
+                        is_read=msg.get("isRead", False),
+                        body_html=fetched_body or "",
+                        has_attachments=msg.get("hasAttachments", False),
+                    )
+            except Exception:
+                pass
+
+    # All methods failed, return what we have
+    return EmailDetail(
+        id=email_record.message_id,
+        subject=email_record.subject,
+        sender=EmailAddress(
+            name=email_record.sender_name or "",
+            address=email_record.sender_address or ""
+        ),
+        to_recipients=[],
+        received_at=email_record.received_at.isoformat() if email_record.received_at else None,
+        is_read=email_record.is_read,
+        body_html=f"<pre>{email_record.body_preview or '该邮件未保存完整正文'}</pre>",
+        has_attachments=False,
+    )

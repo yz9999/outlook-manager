@@ -54,6 +54,19 @@ export const useEmailsStore = defineStore('emails', {
                 this.detailLoading = false
             }
         },
+        async fetchLocalEmailDetail(emailDbId) {
+            this.detailLoading = true
+            try {
+                const { data } = await axios.get(
+                    `/api/emails/${emailDbId}/local-detail`
+                )
+                this.currentEmail = data
+            } catch (e) {
+                this.error = e.response?.data?.detail || '获取本地邮件详情失败'
+            } finally {
+                this.detailLoading = false
+            }
+        },
 
         async deleteEmail(accountId, messageId) {
             await axios.delete(`/api/accounts/${accountId}/emails/${messageId}`)

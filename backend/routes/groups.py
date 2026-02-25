@@ -5,6 +5,8 @@ from typing import List
 import httpx
 import time
 
+from scheduler import reload_group_job
+
 from database import get_session
 from models import Group, Account
 from schemas import GroupCreate, GroupUpdate, GroupResponse
@@ -73,6 +75,11 @@ async def create_group(
     session.add(group)
     await session.commit()
     await session.refresh(group)
+
+    # Reload scheduler jobs if auto_sync is enabled
+    if group.auto_sync:
+        await reload_group_job(group.id)
+
     return _build_response(group, 0)
 
 
@@ -117,6 +124,9 @@ async def update_group(
     await session.commit()
     await session.refresh(group)
 
+    # Reload scheduler jobs whenever sync-related settings change
+    await reload_group_job(group.id)
+
     count = await _account_count(session, group.id)
     return _build_response(group, count)
 
@@ -140,6 +150,10 @@ async def delete_group(
 
     await session.delete(group)
     await session.commit()
+
+    # Remove scheduler jobs for deleted group
+    await reload_group_job(group_id)
+
     return {"message": "分组已删除"}
 
 

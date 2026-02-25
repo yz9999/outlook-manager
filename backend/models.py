@@ -76,6 +76,7 @@ class Email(Base):
     received_at = Column(DateTime, nullable=True)
     is_read = Column(Boolean, default=False)
     body_preview = Column(String(500), nullable=True)
+    body_html = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     account = relationship("Account", back_populates="emails", lazy="selectin")

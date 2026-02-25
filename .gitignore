@@ -32,3 +32,12 @@ venv/
 # Environment
 .env
 .env.local
+.env.production
+
+# Logs
+*.log
+
+# Exported account data (may contain credentials)
+success_accounts.*
+failed_accounts.*
+*_export.*

@@ -61,6 +61,8 @@ class AccountCreate(BaseModel):
 class AccountResponse(BaseModel):
     id: int
     email: str
+    password: Optional[str] = None
+    client_id: Optional[str] = None
     status: str
     unread_count: int
     refresh_token: Optional[str] = None
@@ -78,6 +80,14 @@ class AccountResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AccountUpdate(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+    client_id: Optional[str] = None
+    refresh_token: Optional[str] = None
+    remark: Optional[str] = None
 
 
 class AccountUpdateGroup(BaseModel):

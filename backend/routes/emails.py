@@ -385,8 +385,8 @@ async def search_emails(
     total_result = await session.execute(count_q)
     total = total_result.scalar() or 0
 
-    # Fetch page
-    q = q.order_by(Email.received_at.desc())
+    # Fetch page – unread first, then by date
+    q = q.order_by(Email.is_read.asc(), Email.received_at.desc())
     q = q.offset((page - 1) * page_size).limit(page_size)
     result = await session.execute(q)
     emails = result.scalars().all()

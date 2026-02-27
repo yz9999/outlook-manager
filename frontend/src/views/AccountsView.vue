@@ -146,9 +146,8 @@
         <button class="btn btn-primary btn-sm" @click="handleBatchMove" :disabled="batchMoving">
           {{ batchMoving ? '移动中...' : '确认移动' }}
         </button>
-        <button class="btn btn-secondary btn-sm" @click="handleBatchCheckProtocols" :disabled="batchChecking">
-          {{ batchChecking ? '🔍 检测中...' : '🔍 检测协议' }}
-        </button>
+        <button class="btn btn-secondary btn-sm" @click="batchCopyShort">📋 复制 邮箱----密码</button>
+        <button class="btn btn-secondary btn-sm" @click="batchCopyFull">📋 复制 完整信息</button>
         <button class="btn btn-secondary btn-sm" @click="handleExportSelected">📥 导出选中</button>
         <button class="btn btn-secondary btn-sm" @click="selectedIds = []">取消选择</button>
       </div>
@@ -195,7 +194,14 @@
                 <td>
                   <input type="checkbox" :value="account.id" v-model="selectedIds" />
                 </td>
-                <td :style="{fontWeight: account.refresh_status==='failed' ? 700 : 500, color: account.refresh_status==='failed' ? '#ef4444' : 'inherit'}">{{ account.email }}</td>
+                <td>
+                  <span
+                    class="email-clickable"
+                    :style="{fontWeight: account.refresh_status==='failed' ? 700 : 500, color: account.refresh_status==='failed' ? '#ef4444' : 'var(--accent-light)'}"
+                    @click="openEditModal(account)"
+                    title="点击编辑账号信息"
+                  >{{ account.email }}</span>
+                </td>
                 <td style="font-size:0.8rem;color:var(--text-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="account.remark">{{ account.remark || '—' }}</td>
                 <td>
                   <select
@@ -232,7 +238,7 @@
                   {{ account.last_synced ? formatTime(account.last_synced) : '未同步' }}
                 </td>
                 <td>
-                  <div style="display: flex; gap: 6px;">
+                  <div style="display: flex; gap: 6px; flex-wrap: wrap;">
                     <button
                       v-if="!account.refresh_token"
                       class="btn btn-sm" style="background:var(--accent);color:#fff;"
@@ -244,24 +250,44 @@
                       class="btn btn-sm"
                       :class="emailViewAccount && emailViewAccount.id === account.id ? 'btn-primary' : 'btn-secondary'"
                       @click="toggleEmailView(account)"
+                      title="查看邮件"
                     >
                       📬 邮件
                     </button>
-                    <button
-                      class="btn btn-secondary btn-sm"
-                      @click="checkProtocols(account)"
-                      :disabled="account._checking"
-                      title="检测协议"
-                    >
-                      {{ account._checking ? '⏳' : '🔍' }}
-                    </button>
+
                     <button
                       class="btn btn-secondary btn-sm"
                       @click="syncOne(account.id)"
                       :disabled="account.status === 'syncing'"
+                      title="同步邮件"
                     >
-                      🔄
+                      📬 同步
                     </button>
+                    <button
+                      class="btn btn-secondary btn-sm"
+                      @click="refreshOneToken(account)"
+                      :disabled="account._refreshing"
+                      title="刷新Token"
+                    >
+                      {{ account._refreshing ? '⏳' : '🔑 刷新' }}
+                    </button>
+                    <div class="copy-dropdown-wrap" style="position:relative;">
+                      <button
+                        class="btn btn-secondary btn-sm"
+                        @click.stop="toggleCopyMenu(account.id)"
+                        title="复制账号信息"
+                      >
+                        📋
+                      </button>
+                      <div v-if="copyMenuOpenId === account.id" class="copy-dropdown-menu">
+                        <div class="copy-dropdown-item" @click="copyAccountShort(account)">
+                          📧 邮箱----密码
+                        </div>
+                        <div class="copy-dropdown-item" @click="copyAccountFull(account)">
+                          🔑 邮箱----密码----client_id----refresh_token
+                        </div>
+                      </div>
+                    </div>
                     <button
                       class="btn btn-danger btn-sm"
                       @click="confirmDelete(account)"
@@ -600,6 +626,44 @@
           <button class="btn btn-secondary" @click="deleteTarget = null">取消</button>
           <button class="btn btn-danger" @click="handleDelete" :disabled="deleting">
             {{ deleting ? '删除中...' : '确认删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Account Modal -->
+    <div v-if="editTarget" class="modal-overlay" @click.self="editTarget = null">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>✏️ 编辑账号</h3>
+          <button class="btn btn-icon btn-secondary" @click="editTarget = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">邮箱地址</label>
+            <input class="form-input" v-model="editForm.email" placeholder="user@outlook.com" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">密码</label>
+            <input class="form-input" v-model="editForm.password" placeholder="密码" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Client ID <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
+            <input class="form-input" v-model="editForm.client_id" placeholder="Azure App Client ID" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Refresh Token <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
+            <textarea class="form-textarea" v-model="editForm.refresh_token" rows="3" placeholder="Refresh Token"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">备注 <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
+            <input class="form-input" v-model="editForm.remark" placeholder="备注信息" />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="editTarget = null">取消</button>
+          <button class="btn btn-primary" @click="handleEditSave" :disabled="editSaving">
+            {{ editSaving ? '保存中...' : '保存修改' }}
           </button>
         </div>
       </div>
@@ -976,6 +1040,97 @@ const refreshProgress = ref({ current: 0, total: 0, success: 0, fail: 0, done: f
 const deleteTarget = ref(null)
 const deleting = ref(false)
 
+// Edit account
+const editTarget = ref(null)
+const editSaving = ref(false)
+const editForm = ref({ email: '', password: '', client_id: '', refresh_token: '', remark: '' })
+
+function openEditModal(account) {
+  editTarget.value = account
+  editForm.value = {
+    email: account.email || '',
+    password: account.password || '',
+    client_id: account.client_id || '',
+    refresh_token: account.refresh_token || '',
+    remark: account.remark || '',
+  }
+}
+
+async function handleEditSave() {
+  if (!editTarget.value) return
+  if (!editForm.value.email || !editForm.value.password) {
+    notifStore.addToast('邮箱和密码不能为空', 'error')
+    return
+  }
+  editSaving.value = true
+  try {
+    await accountsStore.updateAccount(editTarget.value.id, editForm.value)
+    notifStore.addToast('账号信息已更新', 'success')
+    editTarget.value = null
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || '更新失败', 'error')
+  } finally {
+    editSaving.value = false
+  }
+}
+
+// Copy dropdown
+const copyMenuOpenId = ref(null)
+
+function toggleCopyMenu(accountId) {
+  copyMenuOpenId.value = copyMenuOpenId.value === accountId ? null : accountId
+}
+
+function closeCopyMenu() {
+  copyMenuOpenId.value = null
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    notifStore.addToast('已复制到剪贴板', 'success')
+  } catch {
+    notifStore.addToast('复制失败', 'error')
+  }
+}
+
+function copyAccountShort(account) {
+  copyToClipboard(`${account.email}----${account.password || ''}`)
+  closeCopyMenu()
+}
+
+function copyAccountFull(account) {
+  copyToClipboard(`${account.email}----${account.password || ''}----${account.client_id || ''}----${account.refresh_token || ''}`)
+  closeCopyMenu()
+}
+
+// Batch copy selected accounts
+function batchCopyShort() {
+  const selected = accounts.value.filter(a => selectedIds.value.includes(a.id))
+  const text = selected.map(a => `${a.email}----${a.password || ''}`).join('\n')
+  copyToClipboard(text)
+}
+
+function batchCopyFull() {
+  const selected = accounts.value.filter(a => selectedIds.value.includes(a.id))
+  const text = selected.map(a => `${a.email}----${a.password || ''}----${a.client_id || ''}----${a.refresh_token || ''}`).join('\n')
+  copyToClipboard(text)
+}
+
+// Refresh single token
+async function refreshOneToken(account) {
+  account._refreshing = true
+  try {
+    await axios.post(`/api/accounts/${account.id}/retry-refresh`)
+    notifStore.addToast(`${account.email} Token 刷新成功`, 'success')
+    await accountsStore.fetchAccounts()
+  } catch (e) {
+    notifStore.addToast(e.response?.data?.detail || 'Token 刷新失败', 'error')
+  } finally {
+    account._refreshing = false
+  }
+}
+
 function statusText(s) {
   return { active: '正常', error: '异常', syncing: '同步中', disabled: '已禁用' }[s] || s
 }
@@ -1084,10 +1239,6 @@ function cancelDeviceCode() {
   stopDeviceCodePolling()
   deviceCode.value = null
 }
-
-onUnmounted(() => {
-  stopDeviceCodePolling()
-})
 
 async function changeGroup(accountId, value) {
   const groupId = value === '' ? null : parseInt(value)
@@ -1460,6 +1611,12 @@ function startRefreshAll() {
 onMounted(() => {
   groupsStore.fetchGroups()
   loadSettings()
+  document.addEventListener('click', closeCopyMenu)
+})
+
+onUnmounted(() => {
+  stopDeviceCodePolling()
+  document.removeEventListener('click', closeCopyMenu)
 })
 </script>
 
@@ -1489,6 +1646,40 @@ input[type="checkbox"] {
 
 .search-result-row:hover {
   background: rgba(99, 102, 241, 0.08) !important;
+}
+
+.email-clickable {
+  cursor: pointer;
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+.email-clickable:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.copy-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  min-width: 280px;
+  background: var(--card-bg, #1e2032);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  padding: 6px 0;
+  margin-top: 4px;
+}
+.copy-dropdown-item {
+  padding: 10px 16px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.copy-dropdown-item:hover {
+  background: rgba(99, 102, 241, 0.12);
 }
 </style>
 

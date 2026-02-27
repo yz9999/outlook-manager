@@ -10,6 +10,7 @@ from models import Account, Group
 from schemas import (
     AccountCreate,
     AccountResponse,
+    AccountUpdate,
     AccountUpdateGroup,
     BatchImportRequest,
     BatchImportResult,
@@ -137,6 +138,44 @@ async def delete_account(
     await session.commit()
     return {"message": "已删除"}
 
+
+@router.put("/{account_id}", response_model=AccountResponse)
+async def update_account(
+    account_id: int,
+    payload: AccountUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Update account info (email, password, client_id, refresh_token, remark)."""
+    result = await session.execute(
+        select(Account).where(Account.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "账号不存在")
+
+    # Check email uniqueness if changing email
+    if payload.email is not None and payload.email != account.email:
+        existing = await session.execute(
+            select(Account).where(Account.email == payload.email)
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(400, f"邮箱 {payload.email} 已被使用")
+        account.email = payload.email
+
+    if payload.password is not None:
+        account.password = payload.password
+    if payload.client_id is not None:
+        account.client_id = payload.client_id if payload.client_id else None
+    if payload.refresh_token is not None:
+        account.refresh_token = payload.refresh_token if payload.refresh_token else None
+    if payload.remark is not None:
+        account.remark = payload.remark if payload.remark else None
+
+    await session.commit()
+    await session.refresh(account)
+    resp = AccountResponse.model_validate(account)
+    resp.group_name = account.group.name if account.group else None
+    return resp
 
 @router.patch("/{account_id}/group")
 async def update_account_group(

@@ -54,6 +54,13 @@ export const useAccountsStore = defineStore('accounts', {
             if (account) account.group_id = groupId
         },
 
+        async updateAccount(id, payload) {
+            const { data } = await axios.put(`/api/accounts/${id}`, payload)
+            const idx = this.accounts.findIndex((a) => a.id === id)
+            if (idx !== -1) this.accounts[idx] = data
+            return data
+        },
+
         async syncAccount(id) {
             const account = this.accounts.find((a) => a.id === id)
             if (account) account.status = 'syncing'
